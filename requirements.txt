@@ -1,0 +1,7 @@
+groq
+jira
+requests
+python-dotenv
+openpyxl
+gspread
+google-auth
