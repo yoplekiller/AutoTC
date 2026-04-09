@@ -29,7 +29,7 @@ load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CONTEXTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "contexts")
 
-
+# URL에서 텍스트 내용을 가져오는 함수
 def fetch_url_text(url: str) -> str:
     """URL에서 텍스트 내용을 가져옵니다."""
     try:
@@ -45,7 +45,7 @@ def fetch_url_text(url: str) -> str:
         print(f"  [경고] URL 페치 실패: {e}")
         return ""
 
-
+# Groq AI로 컨텍스트 문서 생성
 def generate_context(service_name: str, url_text: str = "", feature: str = "") -> str:
     """Groq AI로 서비스 컨텍스트 문서를 생성합니다."""
 

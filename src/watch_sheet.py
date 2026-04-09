@@ -154,7 +154,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
             {
                 "role": "system",
                 "content": (
-                    "당신은 시니어 QA 엔지니어입니다. "
+                    "당신은 10년차 시니어 QA 엔지니어입니다. "
                     "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
                     "서비스 컨텍스트가 제공된 경우 이를 적극 반영하세요. "
                     "한국어로 작성하세요."
@@ -195,7 +195,7 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
             {
                 "role": "system",
                 "content": (
-                    "당신은 경력 5년 이상의 QA 엔지니어입니다. "
+                    "당신은 10년차 시니어 QA 엔지니어입니다. "
                     "실무 수준의 매뉴얼 테스트 케이스를 작성합니다. "
                     "테스트 단계는 테스터가 그대로 따라할 수 있을 만큼 구체적으로 작성하세요."
                 ),
@@ -260,7 +260,7 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     import gspread
 
     sheet_title = issue["summary"][:100]  # 시트 이름 = 티켓 제목
-    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과(P/F/N/A)", "우선순위", "비고"]
+    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과", "우선순위", "비고"]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
@@ -307,7 +307,7 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
             tc.get("사전조건", ""),
             tc.get("테스트단계", ""),
             tc.get("기대결과", ""),
-            "",                      # 결과(P/F/N/A) - 테스터 입력
+            "",                      # 결과 - 테스터 입력
             tc.get("우선순위", ""),
             "",                      # 비고 - 테스터 입력
         ])
@@ -321,7 +321,7 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
             if color:
                 ws.format(f"H{3 + i}", {"backgroundColor": color})
 
-        # 결과(P/F/N/A) 드롭다운 (G열, 0-indexed: col 6)
+        # 결과 드롭다운 (G열, 0-indexed: col 6)
         end_row = 3 + len(rows_to_add)
         sh.batch_update({"requests": [{
             "setDataValidation": {
