@@ -86,7 +86,7 @@ def load_context(context_name: str) -> str:
     with open(path, encoding="utf-8") as f:
         return f.read().strip()
 
-
+# 티켓 설명 보완 및 요구사항 추론
 def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> str:
     """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다."""
     context_section = f"\n\n[서비스 컨텍스트]\n{context}" if context else ""
@@ -123,7 +123,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
     )
     return response.choices[0].message.content.strip()
 
-
+# TC 생성
 def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
     """Groq API를 사용해 테스트 케이스를 생성합니다."""
     type_hint = {
