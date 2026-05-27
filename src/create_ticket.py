@@ -1,0 +1,112 @@
+import sys
+import os
+import re
+import json
+import argparse
+import requests
+from jira import JIRA
+from groq import Groq
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# 상위 폴더의 src.utils 모듈을 가져오기 위한 경로 설정 및 예외 처리
+try:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.utils import sanitize
+except ImportError:
+    # 혹시 utils 구조가 없거나 임포트에 실패할 경우를 위한 백업 보정 함수
+    def sanitize(data):
+        return data
+
+load_dotenv()
+
+# 환경 변수 로드
+JIRA_URL = os.getenv("JIRA_URL", "")
+JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
+JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
+JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "MKQA")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+# 제미나이 초기화
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+
+def generate_ticket_content(groq_client: Groq, description: str, issue_type: str = None) -> dict:
+    """Groq Llama 3.3 모델을 사용하여 1차적으로 요구사항 분석 및 구조화된 JSON 데이터 추출"""
+    type_instruction = (
+        f"이슈 유형은 반드시 '{issue_type}'으로 설정하세요."
+        if issue_type
+        else "설명을 분석해 가장 적합한 이슈 유형(Bug/Story/Task)을 자동 선택하세요."
+    )
+
+    prompt = f"""다음 설명을 바탕으로 Jira 티켓을 작성해주세요.
+
+설명: {description}
+
+{type_instruction}
+
+아래 JSON 형식으로만 응답하세요. 마크다운 기호(```) 없이 순수한 JSON만 출력하세요.
+
+Bug일 경우:
+{{
+  "summary": "간결하고 명확한 제목",
+  "issue_type": "Bug",
+  "priority": "High|Medium|Low",
+  "sections": [
+    {{"heading": "현상", "content": "어떤 문제가 발생하는지 설명"}},
+    {{"heading": "재현 단계", "content": ["1. 단계1", "2. 단계2", "3. 단계3"]}},
+    {{"heading": "기대 결과", "content": "정상 동작 시 예상 결과"}},
+    {{"heading": "실제 결과", "content": "현재 실제로 발생하는 결과"}}
+  ],
+  "acceptance_criteria": ["검수 기준 1", "검수 기준 2"]
+}}
+
+Story일 경우:
+{{
+  "summary": "간결하고 명확한 제목",
+  "issue_type": "Story",
+  "priority": "High|Medium|Low",
+  "sections": [
+    {{"heading": "사용자 스토리", "content": "~로서 ~하고 싶다. ~하기 위해."}},
+    {{"heading": "배경 및 목적", "content": "왜 이 기능이 필요한지 설명"}}
+  ],
+  "acceptance_criteria": ["AC 1", "AC 2", "AC 3"]
+}}
+
+Task일 경우:
+{{
+  "summary": "간결하고 명확한 제목",
+  "issue_type": "Task",
+  "priority": "High|Medium|Low",
+  "sections": [
+    {{"heading": "작업 내용", "content": "무엇을 해야 하는지 설명"}},
+    {{"heading": "작업 범위", "content": ["범위1", "범위2"]}}
+  ],
+  "acceptance_criteria": ["완료 기준 1", "완료 기준 2"]
+}}"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 Jira 티켓 작성 전문가입니다. "
+                    "짧은 설명을 받아 실무 수준의 Jira 티켓을 작성합니다. "
+                    "반드시 JSON 형식으로만 응답하세요. "
+                    "반드시 순수한 한국어로만 작성하세요. 한국어, 숫자, 영문 외 다른 언어는 절대 사용하지 마세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+    )
+
+    raw = response.choices[0].message.content.strip()
+    # 마크다운 코드 블록 제거용 정규식 가다듬기
+    raw = re.sub(r"^```json\s*|\s*```$", "", raw, flags=re.MULTILINE)

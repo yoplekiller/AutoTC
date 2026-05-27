@@ -100,7 +100,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
                     "당신은 시니어 QA 엔지니어입니다. "
                     "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
                     "서비스 컨텍스트가 제공된 경우 이를 적극 반영하세요. "
-                    "한국어로 작성하세요."
+                    "반드시 순수한 한국어로만 작성하세요. 한국어, 숫자, 영문 외 다른 언어(중국어, 일본어, 러시아어 등)는 절대 사용하지 마세요."
                 ),
             },
             {
@@ -139,9 +139,10 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
             {
                 "role": "system",
                 "content": (
-                    "당신은 경력 5년 이상의 QA 엔지니어입니다. "
-                    "실무 수준의 매뉴얼 테스트 케이스를 작성합니다. "
-                    "테스트 단계는 테스터가 그대로 따라할 수 있을 만큼 구체적으로 작성하세요."
+                    "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
+                    "실무 표준 10대 원칙에 따라 매뉴얼 테스트 케이스를 작성합니다. "
+                    "누가 검수하더라도 동일한 프로세스를 밟아 동일한 결과를 도출할 수 있도록 정형화하세요. "
+                    "테스트 단계는 테스터가 화면을 보며 그대로 따라할 수 있는 원자적이고 명확한 조작 순서로 작성하세요."
                 ),
             },
             {
@@ -164,22 +165,29 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
 
 [작성 지침]
 - {type_hint}
-- 테스트유형: 기능 / 예외처리 / 경계값 / 회귀 / 보안 중 적절한 것 선택
-- 사전조건은 테스트 실행 전 필요한 상태를 명시 (예: 로그인 상태, 특정 데이터 존재 등)
-- 테스트 단계는 번호 매겨서 UI 기준으로 구체적으로 작성
-- 기대결과는 눈으로 확인 가능한 수준으로 작성하며 반드시 "~됨" 으로 끝낼 것 (예: "로그인 페이지로 이동됨", "에러 메시지가 표시됨")
+- tc_id 형식: TC_{{모듈코드}}_{{3자리 일련번호}} (예: TC_AUTH_001, TC_PAY_005)
+  모듈 코드: AUTH(회원인증), CART(장바구니), PAY(주문/결제), MY(마이페이지), SEARCH(검색), PROD(상품), HOME(홈), FUNC(기타)
+- 대분류: 테스트 대상의 최상위 기능 도메인 (예: 회원인증, 주문/결제, 마이페이지)
+- 소분류: 대분류 하위 세부 기능 (예: 간편 로그인, 쿠폰 할인 적용, 배송지 선택)
+- 테스트유형: 기능 / 예외처리 / 경계값 / 회귀 / 보안 / UI/UX / 네트워크 중 적절한 것 선택
+- 테스트시나리오: "무엇을 검증하기 위한 것인지" 한 문장으로 목적을 명확하게 서술 (예: 만료된 쿠폰 입력 시 결제 차단 및 얼럿 노출 검증)
+- 사전조건: 번호 매겨서 테스트 실행 전 반드시 세팅되어야 할 상태를 명시 (예: 1. 로그인 완료 상태\n2. 장바구니에 10,000원 이상 상품 담김)
+- 테스트단계: 번호 매겨서 UI 기준으로 원자적이고 구체적인 조작 순서 작성 (나쁜 예: "쿠폰을 등록해 본다" / 좋은 예: "1. 결제창 쿠폰 입력란 클릭\n2. 코드 입력\n3. [적용] 버튼 클릭")
+- 기대결과: 눈으로 판별 가능한 팩트 위주로 작성하며 반드시 "~됨" 또는 "~함" 으로 단정적으로 끝낼 것
 
 반드시 아래 JSON 배열 형식으로만 응답하세요. 마크다운 없이 JSON만 출력하세요.
 
 [
   {{
-    "tc_id": "TC-001",
-    "테스트유형": "기능",
-    "테스트항목": "",
-    "사전조건": "",
+    "tc_id": "TC_PAY_001",
+    "대분류": "주문/결제",
+    "소분류": "쿠폰 적용",
+    "테스트유형": "예외처리",
+    "우선순위": "High",
+    "테스트시나리오": "만료된 쿠폰 코드 입력 시 결제 적용 차단 및 얼럿 전시 검증",
+    "사전조건": "1. 로그인 완료 상태\\n2. 만료된 쿠폰 'EXP50' 보유",
     "테스트단계": "1. 단계1\\n2. 단계2\\n3. 단계3",
-    "기대결과": "",
-    "우선순위": "High"
+    "기대결과": "\"만료된 쿠폰입니다.\" 안내 팝업이 노출되며 결제 금액이 차감되지 않음"
   }}
 ]""",
             },
@@ -197,12 +205,14 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
         return [
             {
                 "tc_id": "TC-ERROR",
+                "대분류": "",
+                "소분류": "",
                 "테스트유형": "",
-                "테스트항목": raw,
+                "우선순위": "",
+                "테스트시나리오": raw,
                 "사전조건": "",
                 "테스트단계": "",
                 "기대결과": "",
-                "우선순위": "",
             }
         ]
 
@@ -259,9 +269,13 @@ def save_excel(results: list, output_path: str):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # 기본 빈 시트 제거
 
-    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과(P/F/N/A)", "우선순위", "비고"]
-    col_widths = [12, 12, 30, 28, 45, 35, 14, 10, 20]
-    last_col_letter = chr(64 + len(headers))  # "I"
+    headers = [
+        "TC ID", "대분류", "소분류", "테스트유형", "우선순위",
+        "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
+        "실제 결과", "테스트 상태", "연결 버그 / 비고",
+    ]
+    col_widths = [14, 14, 16, 12, 10, 35, 28, 45, 35, 30, 12, 20]
+    last_col_letter = "L"
 
     header_font  = Font(bold=True, color="FFFFFF")
     header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -269,8 +283,13 @@ def save_excel(results: list, output_path: str):
     center_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
     top_align    = Alignment(vertical="top", wrap_text=True)
 
+    priority_fills = {
+        "High":   PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid"),
+        "Medium": PatternFill(start_color="FFF3CC", end_color="FFF3CC", fill_type="solid"),
+        "Low":    PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid"),
+    }
+
     for item in results:
-        # 시트 이름 = 티켓 제목 (Excel 31자 제한, 특수문자 제거)
         sheet_title = re.sub(r'[\\/*?:\[\]]', '', item["summary"])[:31]
         ws = wb.create_sheet(title=sheet_title)
 
@@ -296,20 +315,27 @@ def save_excel(results: list, output_path: str):
         # 행 3~: TC 데이터
         last_row = 2 + len(item["test_cases"])
         for r_idx, tc in enumerate(item["test_cases"], start=3):
-            ws.cell(row=r_idx, column=1, value=tc.get("tc_id", "")).alignment = center_align
-            ws.cell(row=r_idx, column=2, value=tc.get("테스트유형", "")).alignment = center_align
-            ws.cell(row=r_idx, column=3, value=tc.get("테스트항목", "")).alignment = top_align
-            ws.cell(row=r_idx, column=4, value=tc.get("사전조건", "")).alignment = top_align
-            ws.cell(row=r_idx, column=5, value=tc.get("테스트단계", "")).alignment = top_align
-            ws.cell(row=r_idx, column=6, value=tc.get("기대결과", "")).alignment = top_align
-            ws.cell(row=r_idx, column=7, value="").alignment = center_align  # 결과(P/F/N/A)
-            ws.cell(row=r_idx, column=8, value=tc.get("우선순위", "")).alignment = center_align
-            ws.cell(row=r_idx, column=9, value="").alignment = top_align     # 비고
+            ws.cell(row=r_idx, column=1,  value=tc.get("tc_id", "")).alignment = center_align
+            ws.cell(row=r_idx, column=2,  value=tc.get("대분류", "")).alignment = center_align
+            ws.cell(row=r_idx, column=3,  value=tc.get("소분류", "")).alignment = center_align
+            ws.cell(row=r_idx, column=4,  value=tc.get("테스트유형", "")).alignment = center_align
+            priority = tc.get("우선순위", "")
+            p_cell = ws.cell(row=r_idx, column=5, value=priority)
+            p_cell.alignment = center_align
+            if priority in priority_fills:
+                p_cell.fill = priority_fills[priority]
+            ws.cell(row=r_idx, column=6,  value=tc.get("테스트시나리오", "")).alignment = top_align
+            ws.cell(row=r_idx, column=7,  value=tc.get("사전조건", "")).alignment = top_align
+            ws.cell(row=r_idx, column=8,  value=tc.get("테스트단계", "")).alignment = top_align
+            ws.cell(row=r_idx, column=9,  value=tc.get("기대결과", "")).alignment = top_align
+            ws.cell(row=r_idx, column=10, value="").alignment = top_align    # 실제 결과
+            ws.cell(row=r_idx, column=11, value="").alignment = center_align  # 테스트 상태
+            ws.cell(row=r_idx, column=12, value="").alignment = top_align    # 연결 버그/비고
             ws.row_dimensions[r_idx].height = 70
 
-        # 결과(P/F/N/A) 드롭다운 (G열)
-        dv = DataValidation(type="list", formula1='"P,F,N/A"', allow_blank=True, showDropDown=False)
-        dv.sqref = f"G3:G{last_row}"
+        # 테스트 상태 드롭다운 (K열): P / F / B / N/A
+        dv = DataValidation(type="list", formula1='"P,F,B,N/A"', allow_blank=True, showDropDown=False)
+        dv.sqref = f"K3:K{last_row}"
         ws.add_data_validation(dv)
 
     wb.save(output_path)
@@ -363,16 +389,20 @@ def save_to_sheets(results: list, sheet_id: str):
     gc = _get_gspread_client()
     sh = gc.open_by_key(sheet_id)
 
-    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과", "우선순위", "비고"]
+    headers = [
+        "TC ID", "대분류", "소분류", "테스트유형", "우선순위",
+        "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
+        "실제 결과", "테스트 상태", "연결 버그 / 비고",
+    ]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
         "Low":    {"red": 0.85, "green": 0.92, "blue": 0.85},
     }
+    col_widths = [100, 110, 120, 110, 90, 280, 200, 320, 260, 220, 100, 160]
     total_tc = 0
 
     for item in results:
-        # 시트 이름 = 티켓 제목 (100자 제한)
         sheet_title = item["summary"][:100]
         ticket_url = f"{JIRA_URL}/browse/{item['key']}"
 
@@ -391,11 +421,11 @@ def save_to_sheets(results: list, sheet_id: str):
             "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
             "horizontalAlignment": "LEFT",
         })
-        ws.merge_cells(f"A1:{chr(64 + len(headers))}1")
+        ws.merge_cells("A1:L1")
 
         # 행 2: 컬럼 헤더
         ws.update([headers], "A2")
-        ws.format(f"A2:{chr(64 + len(headers))}2", {
+        ws.format("A2:L2", {
             "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
             "horizontalAlignment": "CENTER",
@@ -406,24 +436,28 @@ def save_to_sheets(results: list, sheet_id: str):
         for tc in item["test_cases"]:
             rows_data.append([
                 tc.get("tc_id", ""),
+                tc.get("대분류", ""),
+                tc.get("소분류", ""),
                 tc.get("테스트유형", ""),
-                tc.get("테스트항목", ""),
+                tc.get("우선순위", ""),
+                tc.get("테스트시나리오", ""),
                 tc.get("사전조건", ""),
                 tc.get("테스트단계", ""),
                 tc.get("기대결과", ""),
-                "",  # 결과(P/F/N/A)
-                tc.get("우선순위", ""),
-                "",  # 비고
+                "",  # 실제 결과
+                "",  # 테스트 상태
+                "",  # 연결 버그/비고
             ])
         if rows_data:
             ws.update(rows_data, "A3")
-            # 우선순위 색상 (H열)
+
+            # 우선순위 색상 (E열, col 4)
             for i, tc in enumerate(item["test_cases"]):
                 color = priority_colors.get(tc.get("우선순위", ""))
                 if color:
-                    ws.format(f"H{3 + i}", {"backgroundColor": color})
+                    ws.format(f"E{3 + i}", {"backgroundColor": color})
 
-            # 결과(P/F/N/A) 드롭다운 (G열, 0-indexed: col 6)
+            # 테스트 상태 드롭다운 (K열, 0-indexed col 10): P / F / B / N/A
             end_row = 3 + len(rows_data)
             sh.batch_update({"requests": [{
                 "setDataValidation": {
@@ -431,8 +465,8 @@ def save_to_sheets(results: list, sheet_id: str):
                         "sheetId": ws.id,
                         "startRowIndex": 2,
                         "endRowIndex": end_row,
-                        "startColumnIndex": 6,
-                        "endColumnIndex": 7,
+                        "startColumnIndex": 10,
+                        "endColumnIndex": 11,
                     },
                     "rule": {
                         "condition": {
@@ -440,6 +474,7 @@ def save_to_sheets(results: list, sheet_id: str):
                             "values": [
                                 {"userEnteredValue": "P"},
                                 {"userEnteredValue": "F"},
+                                {"userEnteredValue": "B"},
                                 {"userEnteredValue": "N/A"},
                             ],
                         },
@@ -448,6 +483,14 @@ def save_to_sheets(results: list, sheet_id: str):
                     },
                 }
             }]})
+
+            # 열 너비 설정
+            requests_body = [{"updateDimensionProperties": {
+                "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
+                "properties": {"pixelSize": px},
+                "fields": "pixelSize",
+            }} for i, px in enumerate(col_widths)]
+            sh.batch_update({"requests": requests_body})
 
         total_tc += len(item["test_cases"])
         print(f"  '{sheet_title}' — TC {len(item['test_cases'])}개 저장")
@@ -461,10 +504,10 @@ def save_to_sheets(results: list, sheet_id: str):
 # ── 처리 공통 로직 ────────────────────────────────────────────────────
 
 def filter_tc_list(tc_list: list) -> list:
-    """테스트항목/기대결과가 None이거나 비어있는 TC를 제거합니다."""
+    """필수 필드(테스트시나리오, 기대결과)가 없는 TC를 제거합니다."""
     valid = []
     for tc in tc_list:
-        if not tc.get("테스트항목") or not tc.get("기대결과"):
+        if not tc.get("테스트시나리오") or not tc.get("기대결과"):
             print(f"    [필터] {tc.get('tc_id')} 제외 - 필수 항목 누락")
             continue
         valid.append(tc)
@@ -493,7 +536,7 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
         tc_list = filter_tc_list(tc_list)
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:
-            print(f"    [{tc.get('tc_id')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트항목')}")
+            print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
 
         results.append({
             "key": issue["key"],
