@@ -38,11 +38,14 @@ from groq import Groq
 
 load_dotenv()
 
-# Slack 및 AI 클라이언트 초기화
-bolt_app = App(
-    token=os.getenv("SLACK_BOT_TOKEN"),
-    signing_secret=os.getenv("SLACK_SIGNING_SECRET")
-)
+# Slack 및 AI 클라이언트 초기화 (환경변수 미설정 시 비활성화)
+_slack_token = os.getenv("SLACK_BOT_TOKEN")
+_slack_secret = os.getenv("SLACK_SIGNING_SECRET")
+
+if _slack_token and _slack_secret:
+    bolt_app = App(token=_slack_token, signing_secret=_slack_secret)
+else:
+    bolt_app = None
 
 JIRA_URL = os.getenv("JIRA_URL", "")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")  # 기본으로 업데이트할 스프레드시트 ID
@@ -378,17 +381,18 @@ def execute_lazy_review_analysis(command, respond, client):
 
 
 # 슬랙 앱 커맨드 등록 (ack와 lazy 분리를 통해 슬랙 타임아웃 100% 회피)
-bolt_app.command("/tc")(
-    ack=ack_tc_command,
-    lazy=[execute_lazy_tc_generation]
-)
+if bolt_app:
+    bolt_app.command("/tc")(
+        ack=ack_tc_command,
+        lazy=[execute_lazy_tc_generation]
+    )
 
-# /review 커맨드 및 별칭 커맨드 등록
-bolt_app.command("/review")(
-    ack=ack_review_command,
-    lazy=[execute_lazy_review_analysis]
-)
-bolt_app.command("/spec-review")(
-    ack=ack_review_command,
-    lazy=[execute_lazy_review_analysis]
-)
+    bolt_app.command("/review")(
+        ack=ack_review_command,
+        lazy=[execute_lazy_review_analysis]
+    )
+
+    bolt_app.command("/spec-review")(
+        ack=ack_review_command,
+        lazy=[execute_lazy_review_analysis]
+    )

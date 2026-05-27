@@ -26,13 +26,14 @@ try:
     from slack_bolt.adapter.flask import SlackRequestHandler
     from src.slack_app import bolt_app
 
-    bolt_handler = SlackRequestHandler(bolt_app)
+    if bolt_app:
+        bolt_handler = SlackRequestHandler(bolt_app)
 
-    @app.route("/slack/events", methods=["POST"])
-    def slack_events():
-        return bolt_handler.handle(request)
+        @app.route("/slack/events", methods=["POST"])
+        def slack_events():
+            return bolt_handler.handle(request)
 
-except ImportError:
+except Exception:
     pass
 
 
