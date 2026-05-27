@@ -209,18 +209,27 @@ def slack_minutes():
 # ── 서버 실행 ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from pyngrok import ngrok
+    port = int(os.getenv("PORT", 5000))
 
-    port = 5000
-    public_url = ngrok.connect(port).public_url
-    print(f"\n{'='*50}")
-    print(f"  AutoTC Slack 서버 시작")
-    print(f"  Public URL: {public_url}")
-    print(f"")
-    print(f"  Slack App에 아래 URL 등록:")
-    print(f"  /testplan → {public_url}/slack/testplan")
-    print(f"  /ticket   → {public_url}/slack/ticket")
-    print(f"  /minutes  → {public_url}/slack/minutes")
-    print(f"{'='*50}\n")
+    # Railway 배포 환경 (PORT 환경변수 자동 주입됨)
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        app.run(host="0.0.0.0", port=port)
 
-    app.run(port=port)
+    # 로컬 실행 — ngrok으로 공개 URL 생성
+    else:
+        try:
+            from pyngrok import ngrok
+            public_url = ngrok.connect(port).public_url
+            print(f"\n{'='*50}")
+            print(f"  AutoTC Slack 서버 시작 (로컬)")
+            print(f"  Public URL: {public_url}")
+            print(f"")
+            print(f"  Slack App에 아래 URL 등록:")
+            print(f"  /testplan → {public_url}/slack/testplan")
+            print(f"  /ticket   → {public_url}/slack/ticket")
+            print(f"  /minutes  → {public_url}/slack/minutes")
+            print(f"{'='*50}\n")
+        except ImportError:
+            print(f"  서버 시작: http://localhost:{port}")
+            print(f"  (ngrok 미설치 — 외부 접근 불가)")
+        app.run(port=port)

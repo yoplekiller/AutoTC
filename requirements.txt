@@ -1,3 +1,5 @@
+flask
+gunicorn
 groq
 jira
 requests
@@ -5,3 +7,4 @@ python-dotenv
 openpyxl
 gspread
 google-auth
+pyngrok
