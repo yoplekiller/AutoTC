@@ -21,6 +21,20 @@ SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 
 app = Flask(__name__)
 
+# ── Slack Bolt 통합 (/tc, /review, /spec-review) ──────────────────────
+try:
+    from slack_bolt.adapter.flask import SlackRequestHandler
+    from src.slack_app import bolt_app
+
+    bolt_handler = SlackRequestHandler(bolt_app)
+
+    @app.route("/slack/events", methods=["POST"])
+    def slack_events():
+        return bolt_handler.handle(request)
+
+except ImportError:
+    pass
+
 
 def reply(response_url: str, text: str, is_error: bool = False):
     """Slack response_url로 처리 결과를 전송합니다."""
@@ -225,9 +239,12 @@ if __name__ == "__main__":
             print(f"  Public URL: {public_url}")
             print(f"")
             print(f"  Slack App에 아래 URL 등록:")
-            print(f"  /testplan → {public_url}/slack/testplan")
-            print(f"  /ticket   → {public_url}/slack/ticket")
-            print(f"  /minutes  → {public_url}/slack/minutes")
+            print(f"  /testplan    → {public_url}/slack/testplan")
+            print(f"  /ticket      → {public_url}/slack/ticket")
+            print(f"  /minutes     → {public_url}/slack/minutes")
+            print(f"  /tc          → {public_url}/slack/events")
+            print(f"  /review      → {public_url}/slack/events")
+            print(f"  /spec-review → {public_url}/slack/events")
             print(f"{'='*50}\n")
         except ImportError:
             print(f"  서버 시작: http://localhost:{port}")

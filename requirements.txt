@@ -8,3 +8,5 @@ openpyxl
 gspread
 google-auth
 pyngrok
+slack-bolt
+slack-sdk
