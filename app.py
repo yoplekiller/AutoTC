@@ -243,7 +243,6 @@ if __name__ == "__main__":
             print(f"  /testplan    → {public_url}/slack/testplan")
             print(f"  /ticket      → {public_url}/slack/ticket")
             print(f"  /minutes     → {public_url}/slack/minutes")
-            print(f"  /tc          → {public_url}/slack/events")
             print(f"  /review      → {public_url}/slack/events")
             print(f"  /spec-review → {public_url}/slack/events")
             print(f"{'='*50}\n")
