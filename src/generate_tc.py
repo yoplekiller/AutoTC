@@ -20,11 +20,14 @@ Jira 티켓 기반 매뉴얼 TC 자동 생성
 """
 
 import sys
+import io
 import re
 import os
 import json
 import argparse
 from datetime import datetime
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -123,123 +126,84 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
     )
     return response.choices[0].message.content.strip()
 
-# TC 생성
-def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
-    """Groq API를 사용해 테스트 케이스를 생성합니다."""
-    coverage_matrix = {
-        "Bug": (
-            "최소 10개 이상 작성하세요.\n"
-            "  - 기능(재현): 2개 이상 — 버그 재현 경로를 정확히 기술\n"
-            "  - 기능(수정 확인): 2개 이상 — 수정 후 정상 동작 검증\n"
-            "  - 회귀: 3개 이상 — 수정으로 인한 사이드 이펙트 검증\n"
-            "  - 경계값: 2개 이상 — 버그 발생 경계 조건 검증\n"
-            "  - 예외처리: 1개 이상"
-        ),
-        "Story": (
-            "최소 12개 이상 작성하세요.\n"
-            "  - 기능(Happy Path): 3개 이상 — 정상적인 주요 사용 흐름\n"
-            "  - 예외처리: 3개 이상 — 오류 입력, 권한 없음, 서버 오류 등\n"
-            "  - 경계값: 3개 이상 — 최소/최대값, 빈값, 특수문자 등\n"
-            "  - 회귀: 2개 이상 — 기존 기능 영향도 검증\n"
-            "  - 보안/UI/UX: 1개 이상 (해당 시)"
-        ),
-        "Task": (
-            "최소 8개 이상 작성하세요.\n"
-            "  - 기능: 3개 이상 — 작업 완료 후 기능 동작 검증\n"
-            "  - 예외처리: 2개 이상\n"
-            "  - 경계값: 2개 이상\n"
-            "  - 회귀: 1개 이상"
-        ),
-        "Epic": (
-            "최소 15개 이상 작성하세요.\n"
-            "  - 기능(주요 흐름): 4개 이상 — E2E 핵심 시나리오\n"
-            "  - 예외처리: 3개 이상\n"
-            "  - 경계값: 3개 이상\n"
-            "  - 회귀: 3개 이상\n"
-            "  - 보안: 2개 이상"
-        ),
-    }.get(issue["issue_type"], (
-        "최소 10개 이상 작성하세요.\n"
-        "  - 기능: 3개 이상\n"
-        "  - 예외처리: 3개 이상\n"
-        "  - 경계값: 2개 이상\n"
-        "  - 회귀: 2개 이상"
-    ))
+# TC 생성 (단일 유형)
+def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: str,
+                 test_type: str, count: int, start_idx: int) -> list:
+    """특정 테스트 유형의 TC를 생성합니다."""
+    type_guide = {
+        "기능":     "정상적인 사용 흐름(Happy Path) — 기능이 올바르게 작동하는 시나리오",
+        "예외처리": "오류 입력, 권한 없음, 서버 오류, 네트워크 오류 등 비정상 흐름",
+        "경계값":   "최솟값/최댓값, 빈값, 공백, 특수문자, 글자 수 한계 등 경계 조건",
+        "회귀":     "이 기능 변경으로 영향받을 수 있는 연관 기능의 정상 동작 검증",
+        "보안":     "인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등 보안 취약점",
+        "UI/UX":    "버튼 활성화 상태, 에러 메시지 문구, 화면 전환, 로딩 표시 등 UI 동작",
+        "네트워크": "느린 네트워크, 연결 끊김, 타임아웃 상황에서의 동작",
+    }
+    context_block = f"\n\n[기획서/서비스 컨텍스트]\n{context}" if context else ""
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
-                    "실무 표준 10대 원칙에 따라 매뉴얼 테스트 케이스를 작성합니다. "
-                    "누가 검수하더라도 동일한 프로세스를 밟아 동일한 결과를 도출할 수 있도록 정형화하세요. "
-                    "테스트 단계는 테스터가 화면을 보며 그대로 따라할 수 있는 원자적이고 명확한 조작 순서로 작성하세요. "
-                    "지정된 최소 케이스 수를 반드시 충족하세요. TC 수가 부족하면 검수가 불완전해집니다."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"""다음 Jira 티켓에 대한 매뉴얼 테스트 케이스를 작성해주세요.
+    prompt = f"""다음 티켓에 대해 [{test_type}] 유형 TC를 정확히 {count}개 작성하세요.
+
+[테스트 유형 설명]
+{type_guide.get(test_type, test_type)}
 
 [티켓 정보]
-티켓 키: {issue['key']}
-티켓 유형: {issue['issue_type']}
-티켓 제목: {issue['summary']}
+티켓 키: {issue['key']} | 유형: {issue['issue_type']} | 제목: {issue['summary']}
 
-[티켓 설명]
-{issue['description']}
-
-[추론된 요구사항]
-{augmented_spec}{f'''
-
-[서비스 컨텍스트]
-{context}''' if context else ""}
-
-[필수 커버리지 — 반드시 충족할 것]
-{coverage_matrix}
+[요구사항]
+{augmented_spec}{context_block}
 
 [작성 지침]
-- tc_id 형식: TC_{{모듈코드}}_{{3자리 일련번호}} (예: TC_AUTH_001, TC_PAY_005)
+- tc_id: TC_{{모듈}}_{{3자리}} 형식, {start_idx:03d}번부터 시작
   모듈 코드: AUTH(회원인증), CART(장바구니), PAY(주문/결제), MY(마이페이지), SEARCH(검색), PROD(상품), HOME(홈), FUNC(기타)
-- 대분류: 테스트 대상의 최상위 기능 도메인 (예: 회원인증, 주문/결제, 마이페이지)
-- 소분류: 대분류 하위 세부 기능 (예: 간편 로그인, 쿠폰 할인 적용, 배송지 선택)
-- 테스트유형: 기능 / 예외처리 / 경계값 / 회귀 / 보안 / UI/UX / 네트워크 중 적절한 것 선택
-- 테스트시나리오: "무엇을 검증하기 위한 것인지" 한 문장으로 목적을 명확하게 서술
-- 사전조건: 번호 매겨서 테스트 실행 전 반드시 세팅되어야 할 상태를 명시
-- 테스트단계: 번호 매겨서 UI 기준으로 원자적이고 구체적인 조작 순서 작성 (나쁜 예: "쿠폰을 등록해 본다" / 좋은 예: "1. 결제창 쿠폰 입력란 클릭\\n2. 코드 입력\\n3. [적용] 버튼 클릭")
-- 기대결과: 눈으로 판별 가능한 팩트 위주로 작성하며 반드시 "~됨" 또는 "~함" 으로 단정적으로 끝낼 것
+- 테스트유형: 반드시 "{test_type}" 으로 고정
+- 사전조건/테스트단계: 번호 매겨서 구체적으로 작성
+- 기대결과: "~됨" 또는 "~함" 으로 끝낼 것
+- {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
 
-반드시 아래 JSON 배열 형식으로만 응답하세요. 마크다운 없이 JSON만 출력하세요.
+JSON 배열만 출력하세요. 마크다운 없이.
 
 [
   {{
-    "tc_id": "TC_PAY_001",
-    "대분류": "주문/결제",
-    "소분류": "쿠폰 적용",
-    "테스트유형": "기능",
-    "우선순위": "High",
-    "테스트시나리오": "유효한 쿠폰 코드 입력 시 할인 금액이 정상 적용되는지 검증",
-    "사전조건": "1. 로그인 완료 상태\\n2. 유효한 쿠폰 'SAVE10' 보유\\n3. 장바구니에 10,000원 이상 상품 담김",
-    "테스트단계": "1. 결제창에서 쿠폰 입력란 클릭\\n2. 'SAVE10' 입력\\n3. [적용] 버튼 클릭",
-    "기대결과": "할인 금액이 차감된 최종 결제 금액이 표시됨"
-  }},
-  {{
-    "tc_id": "TC_PAY_002",
-    "대분류": "주문/결제",
-    "소분류": "쿠폰 적용",
-    "테스트유형": "예외처리",
-    "우선순위": "High",
-    "테스트시나리오": "만료된 쿠폰 코드 입력 시 결제 적용 차단 및 얼럿 전시 검증",
-    "사전조건": "1. 로그인 완료 상태\\n2. 만료된 쿠폰 'EXP50' 보유",
-    "테스트단계": "1. 결제창에서 쿠폰 입력란 클릭\\n2. 'EXP50' 입력\\n3. [적용] 버튼 클릭",
-    "기대결과": "\\"만료된 쿠폰입니다.\\" 안내 팝업이 노출되며 결제 금액이 차감되지 않음"
+    "tc_id": "TC_AUTH_{start_idx:03d}",
+    "대분류": "...",
+    "소분류": "...",
+    "테스트유형": "{test_type}",
+    "우선순위": "High/Medium/Low",
+    "테스트시나리오": "...",
+    "사전조건": "1. ...\\n2. ...",
+    "테스트단계": "1. ...\\n2. ...\\n3. ...",
+    "기대결과": "...됨"
   }}
-]""",
-            },
-        ],
-    )
+]"""
+
+    import time
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
+                            "지정된 테스트 유형과 개수를 반드시 지켜서 TC를 작성합니다. "
+                            "테스트 단계는 UI 기준으로 원자적이고 명확하게 작성하세요. "
+                            "기대결과는 눈으로 판별 가능한 팩트로, '~됨' 또는 '~함'으로 끝내세요. "
+                            "한국어로만 작성하세요."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=3000,
+            )
+            break
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"    [Rate Limit] {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
 
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -248,20 +212,122 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        print(f"  [경고] JSON 파싱 실패, 원본 텍스트를 저장합니다.")
-        return [
-            {
-                "tc_id": "TC-ERROR",
-                "대분류": "",
-                "소분류": "",
-                "테스트유형": "",
-                "우선순위": "",
-                "테스트시나리오": raw,
-                "사전조건": "",
-                "테스트단계": "",
-                "기대결과": "",
-            }
-        ]
+        print(f"    [경고] {test_type} JSON 파싱 실패")
+        return []
+
+
+# 1단계: 스펙 분석 → TC 플랜 결정
+def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
+    """기획서/스펙 복잡도를 분석해 테스트 유형별 적정 TC 수를 결정합니다."""
+    type_map = {
+        "Bug": "Bug", "버그": "Bug",
+        "Story": "Story", "스토리": "Story",
+        "Task": "Task", "작업": "Task",
+        "Epic": "Epic", "에픽": "Epic",
+    }
+    issue_type = type_map.get(issue["issue_type"], "Story")
+
+    minimums = {
+        "Bug":   {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 3},
+        "Story": {"기능": 3, "예외처리": 3, "경계값": 2, "회귀": 2, "보안": 1, "UI/UX": 1},
+        "Task":  {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 1},
+        "Epic":  {"기능": 4, "예외처리": 3, "경계값": 3, "회귀": 3, "보안": 2},
+    }.get(issue_type, {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 2})
+
+    min_desc = "\n".join([f"  - {t}: 최소 {n}개" for t, n in minimums.items()])
+    context_block = f"\n\n[기획서/스펙]\n{context}" if context else ""
+
+    prompt = f"""다음 티켓과 기획서를 분석해서 테스트 유형별로 몇 개의 TC가 필요한지 결정하세요.
+
+[티켓]
+유형: {issue['issue_type']} | 제목: {issue['summary']}
+
+[추론된 요구사항]
+{augmented_spec}{context_block}
+
+[최솟값 — 반드시 지킬 것]
+{min_desc}
+
+판단 기준:
+- 화면/입력 필드가 많을수록 경계값/예외처리 증가
+- 정책/비즈니스 룰이 복잡할수록 기능/예외처리 증가
+- 연관 기능이 많을수록 회귀 증가
+- 보안·권한 처리가 있으면 보안 포함
+
+아래 JSON 형식으로만 응답하세요. 마크다운 없이.
+{{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자}}
+
+보안/UI/UX가 불필요하면 0으로 설정하세요."""
+
+    import time
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
+                            "기획서 복잡도를 분석해 테스트 유형별 적정 TC 수를 판단합니다. "
+                            "과도하게 적거나 많지 않게, 실무 기준으로 판단하세요. "
+                            "JSON만 출력하세요."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=200,
+            )
+            break
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"    [Rate Limit] {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
+
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        plan_dict = json.loads(raw)
+        # 최솟값 보장 + 0인 유형 제외
+        plan = []
+        for t, min_n in minimums.items():
+            n = max(int(plan_dict.get(t, min_n)), min_n)
+            plan.append((t, n))
+        # 최솟값에 없는 유형(보안, UI/UX 등) 추가
+        for t, n in plan_dict.items():
+            if t not in minimums and int(n) > 0:
+                plan.append((t, int(n)))
+        return plan
+    except (json.JSONDecodeError, ValueError):
+        print("  [경고] 플랜 분석 실패 — 기본값 사용")
+        return [(t, n) for t, n in minimums.items()]
+
+
+# 2단계: 유형별 분리 호출 → 합산
+def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
+    """스펙 복잡도 분석 후 유형별로 TC를 생성합니다."""
+    print(f"  스펙 분석 중 (TC 플랜 결정)...")
+    plan = analyze_spec_for_plan(groq_client, issue, augmented_spec, context)
+    total = sum(n for _, n in plan)
+    plan_str = " + ".join([f"{t} {n}개" for t, n in plan])
+    print(f"  플랜 확정: {plan_str} = 총 {total}개")
+
+    all_tcs = []
+    idx = 1
+
+    for test_type, count in plan:
+        print(f"    [{test_type}] {count}개 생성 중...")
+        batch = _call_tc_api(groq_client, issue, augmented_spec, context, test_type, count, idx)
+        print(f"    [{test_type}] {len(batch)}개 완료")
+        all_tcs.extend(batch)
+        idx += len(batch)
+
+    return all_tcs
 
 
 # ── 엑셀 입력/출력 ────────────────────────────────────────────────────
@@ -317,9 +383,9 @@ def save_excel(results: list, output_path: str):
     wb.remove(wb.active)  # 기본 빈 시트 제거
 
     headers = [
-        "TC ID", "대분류", "소분류", "테스트유형", "우선순위",
+        "TC ID", "대분류", "소분류", "테스트 유형", "우선순위",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "실제 결과", "테스트 상태", "연결 버그 / 비고",
+        "실제 결과", "테스트 상태", "비고 / 버그 링크",
     ]
     col_widths = [14, 14, 16, 12, 10, 35, 28, 45, 35, 30, 12, 20]
     last_col_letter = "L"
@@ -437,9 +503,9 @@ def save_to_sheets(results: list, sheet_id: str):
     sh = gc.open_by_key(sheet_id)
 
     headers = [
-        "TC ID", "대분류", "소분류", "테스트유형", "우선순위",
+        "TC ID", "대분류", "소분류", "테스트 유형", "우선순위",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "실제 결과", "테스트 상태", "연결 버그 / 비고",
+        "실제 결과", "테스트 상태", "비고 / 버그 링크",
     ]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},

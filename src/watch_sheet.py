@@ -316,9 +316,9 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
 
     sheet_title = issue["summary"][:100]
     headers = [
-        "TC ID", "대분류", "소분류", "테스트유형", "우선순위",
+        "TC ID", "대분류", "소분류", "테스트 유형", "우선순위",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "실제 결과", "테스트 상태", "연결 버그 / 비고",
+        "실제 결과", "테스트 상태", "비고 / 버그 링크",
     ]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
