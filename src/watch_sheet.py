@@ -30,6 +30,10 @@ from jira import JIRA
 from groq import Groq
 from dotenv import load_dotenv
 
+
+class DailyTokenLimitError(Exception):
+    pass
+
 load_dotenv()
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -139,6 +143,214 @@ def load_context(context_name: str) -> str:
         return f.read().strip()
 
 
+def extract_spec_url(issue: dict) -> str:
+    """Jira 티켓 설명에서 Notion 또는 Confluence URL을 추출합니다."""
+    description = issue.get('description', '') or ''
+    notion_match = re.search(r'https://(?:www\.)?notion\.so/\S+', description)
+    if notion_match:
+        return notion_match.group(0).rstrip(')')
+    confluence_match = re.search(r'https://\S+atlassian\.net/wiki/\S+', description)
+    if confluence_match:
+        return confluence_match.group(0).rstrip(')')
+    return ""
+
+
+def fetch_notion_page(url: str) -> str:
+    """Notion 페이지 내용을 텍스트로 fetch합니다."""
+    notion_api_key = os.getenv("NOTION_API_KEY")
+    if not notion_api_key:
+        print("  [경고] NOTION_API_KEY 없음 — Notion fetch 건너뜀")
+        return ""
+
+    page_id_match = re.search(r'([a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', url)
+    if not page_id_match:
+        print(f"  [경고] Notion 페이지 ID 추출 실패: {url}")
+        return ""
+
+    raw_id = page_id_match.group(1).replace('-', '')
+    page_id = f"{raw_id[:8]}-{raw_id[8:12]}-{raw_id[12:16]}-{raw_id[16:20]}-{raw_id[20:]}"
+    headers = {
+        "Authorization": f"Bearer {notion_api_key}",
+        "Notion-Version": "2022-06-28",
+    }
+
+    try:
+        resp = requests.get(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"  [경고] Notion API 오류: {resp.status_code}")
+            return ""
+
+        lines = []
+        for block in resp.json().get('results', []):
+            btype = block.get('type', '')
+            rich_text = block.get(btype, {}).get('rich_text', [])
+            text = ''.join(t.get('plain_text', '') for t in rich_text)
+            if not text:
+                continue
+            if btype == 'heading_1':
+                lines.append(f"# {text}")
+            elif btype == 'heading_2':
+                lines.append(f"## {text}")
+            elif btype == 'heading_3':
+                lines.append(f"### {text}")
+            elif btype in ('bulleted_list_item', 'numbered_list_item'):
+                lines.append(f"- {text}")
+            else:
+                lines.append(text)
+
+        return '\n'.join(lines)
+    except Exception as e:
+        print(f"  [경고] Notion fetch 오류: {e}")
+        return ""
+
+
+def fetch_confluence_page(url: str) -> str:
+    """Confluence 페이지 내용을 텍스트로 fetch합니다."""
+    email = os.getenv("JIRA_EMAIL")
+    token = os.getenv("JIRA_API_TOKEN")
+    if not email or not token:
+        print("  [경고] Confluence 인증 정보 없음")
+        return ""
+
+    page_id_match = re.search(r'/pages/(\d+)', url)
+    domain_match = re.search(r'https://([^/]+)', url)
+    if not page_id_match or not domain_match:
+        print(f"  [경고] Confluence URL 파싱 실패: {url}")
+        return ""
+
+    page_id = page_id_match.group(1)
+    domain = domain_match.group(1)
+
+    try:
+        resp = requests.get(
+            f"https://{domain}/wiki/rest/api/content/{page_id}",
+            params={"expand": "body.view"},
+            auth=(email, token),
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"  [경고] Confluence API 오류: {resp.status_code}")
+            return ""
+
+        body = resp.json().get('body', {}).get('view', {}).get('value', '')
+        text = re.sub(r'<[^>]+>', '\n', body)
+        return re.sub(r'\n{3,}', '\n\n', text).strip()
+    except Exception as e:
+        print(f"  [경고] Confluence fetch 오류: {e}")
+        return ""
+
+
+def fetch_spec_from_link(issue: dict) -> str:
+    """Jira 티켓에서 Notion/Confluence 링크를 감지하고 기획서를 fetch합니다."""
+    url = extract_spec_url(issue)
+    if not url:
+        return ""
+
+    print(f"  기획서 링크 감지: {url[:70]}...")
+    if 'notion.so' in url:
+        print("  Notion 페이지 fetch 중...")
+        return fetch_notion_page(url)
+    elif 'atlassian.net/wiki' in url:
+        print("  Confluence 페이지 fetch 중...")
+        return fetch_confluence_page(url)
+    return ""
+
+
+def auto_generate_spec(groq_client: Groq, issue: dict) -> str:
+    """티켓 기반 기능 기획서를 AI로 자동 생성하고 contexts/에 저장합니다."""
+    import time
+
+    prompt = f"""다음 Jira 티켓을 기반으로 QA 테스트에 필요한 기능 기획서를 작성하세요.
+
+[티켓 정보]
+티켓 키: {issue['key']}
+티켓 유형: {issue['issue_type']}
+티켓 제목: {issue['summary']}
+티켓 설명: {issue['description']}
+
+아래 항목을 작성하세요:
+## 1. 기능 개요 및 목적
+## 2. 화면 흐름 (각 단계별 버튼 텍스트, 입력 필드명 포함)
+## 3. 입력값 유효성 규칙 (에러 메시지 문구 포함)
+## 4. 핵심 정책 (타이머, 횟수 제한, 글자 수 제한 등 수치 포함)
+## 5. 예외/에러 케이스 10개 이상 (조건, 에러 메시지, 시스템 동작)
+## 6. 회귀 체크 포인트"""
+
+    response = None
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 시니어 서비스 기획자입니다. "
+                            "QA 엔지니어가 TC를 작성할 수 있도록 구체적인 기획서를 작성합니다. "
+                            "정확한 문구, 수치, 조건을 사용하세요. 한국어로만 작성하세요."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2000,
+            )
+            break
+        except Exception as e:
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
+            if "rate_limit" in e_str or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"  [Rate Limit/분당] spec 생성 {wait}초 대기...")
+                time.sleep(wait)
+            else:
+                raise
+
+    if response is None:
+        print("  [오류] spec 자동 생성 실패 — 티켓 정보만 사용")
+        return ""
+
+    content = response.choices[0].message.content.strip()
+
+    ticket_key_lower = issue['key'].lower().replace('-', '_')
+    spec_path = os.path.join(ROOT_DIR, 'contexts', f'{ticket_key_lower}_spec.md')
+    with open(spec_path, 'w', encoding='utf-8') as f:
+        f.write(f"---\nticket: {issue['key']}\nfeature: {issue['summary']}\ntype: 기능 기획서 (AI 자동 생성)\ngenerated: {datetime.now().strftime('%Y-%m-%d')}\n---\n\n{content}\n")
+    print(f"  spec 저장: contexts/{ticket_key_lower}_spec.md")
+    return content
+
+
+def get_or_generate_spec(groq_client: Groq, issue: dict, service_context: str = "") -> str:
+    """
+    spec 컨텍스트를 아래 우선순위로 반환합니다.
+    1순위: Jira 티켓에 Notion/Confluence 링크 → 실제 기획서 fetch
+    2순위: contexts/{ticket}_spec.md 존재 → 로컬 파일 사용
+    3순위: 없으면 AI mock 자동 생성
+    4순위: 생성 실패 시 서비스 컨텍스트 반환
+    """
+    # 1순위: 링크 fetch
+    fetched = fetch_spec_from_link(issue)
+    if fetched:
+        return fetched
+
+    # 2순위: 로컬 spec 파일
+    ticket_key_lower = issue['key'].lower().replace('-', '_')
+    spec_path = os.path.join(ROOT_DIR, 'contexts', f'{ticket_key_lower}_spec.md')
+    if os.path.exists(spec_path):
+        print(f"  기존 spec 사용: contexts/{ticket_key_lower}_spec.md")
+        with open(spec_path, encoding='utf-8') as f:
+            return f.read().strip()
+
+    # 3순위: AI mock 자동 생성
+    print("  spec 없음 → AI 자동 생성...")
+    generated = auto_generate_spec(groq_client, issue)
+    return generated if generated else service_context
+
+
 def filter_tc_list(tc_list: list) -> list:
     """필수 필드(테스트시나리오, 기대결과)가 없는 TC를 제거합니다."""
     return [tc for tc in tc_list if tc.get("테스트시나리오") and tc.get("기대결과")]
@@ -181,121 +393,92 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
     return response.choices[0].message.content.strip()
 
 
-def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
-    coverage_matrix = {
-        "Bug": (
-            "최소 10개 이상 작성하세요.\n"
-            "  - 기능(재현): 2개 이상 — 버그 재현 경로를 정확히 기술\n"
-            "  - 기능(수정 확인): 2개 이상 — 수정 후 정상 동작 검증\n"
-            "  - 회귀: 3개 이상 — 수정으로 인한 사이드 이펙트 검증\n"
-            "  - 경계값: 2개 이상 — 버그 발생 경계 조건 검증\n"
-            "  - 예외처리: 1개 이상"
-        ),
-        "Story": (
-            "최소 12개 이상 작성하세요.\n"
-            "  - 기능(Happy Path): 3개 이상 — 정상적인 주요 사용 흐름\n"
-            "  - 예외처리: 3개 이상 — 오류 입력, 권한 없음, 서버 오류 등\n"
-            "  - 경계값: 3개 이상 — 최소/최대값, 빈값, 특수문자 등\n"
-            "  - 회귀: 2개 이상 — 기존 기능 영향도 검증\n"
-            "  - 보안/UI/UX: 1개 이상 (해당 시)"
-        ),
-        "Task": (
-            "최소 8개 이상 작성하세요.\n"
-            "  - 기능: 3개 이상 — 작업 완료 후 기능 동작 검증\n"
-            "  - 예외처리: 2개 이상\n"
-            "  - 경계값: 2개 이상\n"
-            "  - 회귀: 1개 이상"
-        ),
-        "Epic": (
-            "최소 15개 이상 작성하세요.\n"
-            "  - 기능(주요 흐름): 4개 이상 — E2E 핵심 시나리오\n"
-            "  - 예외처리: 3개 이상\n"
-            "  - 경계값: 3개 이상\n"
-            "  - 회귀: 3개 이상\n"
-            "  - 보안: 2개 이상"
-        ),
-    }.get(issue["issue_type"], (
-        "최소 10개 이상 작성하세요.\n"
-        "  - 기능: 3개 이상\n"
-        "  - 예외처리: 3개 이상\n"
-        "  - 경계값: 2개 이상\n"
-        "  - 회귀: 2개 이상"
-    ))
+def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: str,
+                 test_type: str, count: int, start_idx: int) -> list:
+    """특정 테스트 유형의 TC를 생성합니다."""
+    type_guide = {
+        "기능":     "정상적인 사용 흐름(Happy Path) — 기능이 올바르게 작동하는 시나리오",
+        "예외처리": "오류 입력, 권한 없음, 서버 오류, 네트워크 오류 등 비정상 흐름",
+        "경계값":   "최솟값/최댓값, 빈값, 공백, 특수문자, 글자 수 한계 등 경계 조건",
+        "회귀":     "이 기능 변경으로 영향받을 수 있는 연관 기능의 정상 동작 검증",
+        "보안":     "인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등 보안 취약점",
+        "UI/UX":    "버튼 활성화 상태, 에러 메시지 문구, 화면 전환, 로딩 표시 등 UI 동작",
+        "네트워크": "느린 네트워크, 연결 끊김, 타임아웃 상황에서의 동작",
+    }
+    context_block = f"\n\n[기획서/서비스 컨텍스트]\n{context}" if context else ""
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
-                    "실무 표준 10대 원칙에 따라 매뉴얼 테스트 케이스를 작성합니다. "
-                    "누가 검수하더라도 동일한 프로세스를 밟아 동일한 결과를 도출할 수 있도록 정형화하세요. "
-                    "테스트 단계는 테스터가 화면을 보며 그대로 따라할 수 있는 원자적이고 명확한 조작 순서로 작성하세요. "
-                    "지정된 최소 케이스 수를 반드시 충족하세요. TC 수가 부족하면 검수가 불완전해집니다."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"""다음 Jira 티켓에 대한 매뉴얼 테스트 케이스를 작성해주세요.
+    prompt = f"""다음 티켓에 대해 [{test_type}] 유형 TC를 정확히 {count}개 작성하세요.
+
+[테스트 유형 설명]
+{type_guide.get(test_type, test_type)}
 
 [티켓 정보]
-티켓 키: {issue['key']}
-티켓 유형: {issue['issue_type']}
-티켓 제목: {issue['summary']}
+티켓 키: {issue['key']} | 유형: {issue['issue_type']} | 제목: {issue['summary']}
 
-[티켓 설명]
-{issue['description']}
-
-[추론된 요구사항]
-{augmented_spec}{f'''
-
-[서비스 컨텍스트]
-{context}''' if context else ""}
-
-[필수 커버리지 — 반드시 충족할 것]
-{coverage_matrix}
+[요구사항]
+{augmented_spec}{context_block}
 
 [작성 지침]
-- tc_id 형식: TC_{{모듈코드}}_{{3자리 일련번호}} (예: TC_AUTH_001, TC_PAY_005)
+- tc_id: TC_{{모듈}}_{{3자리}} 형식, {start_idx:03d}번부터 시작
   모듈 코드: AUTH(회원인증), CART(장바구니), PAY(주문/결제), MY(마이페이지), SEARCH(검색), PROD(상품), HOME(홈), FUNC(기타)
-- 대분류: 테스트 대상의 최상위 기능 도메인
-- 소분류: 대분류 하위 세부 기능
-- 테스트유형: 기능 / 예외처리 / 경계값 / 회귀 / 보안 / UI/UX / 네트워크 중 적절한 것 선택
-- 테스트시나리오: "무엇을 검증하기 위한 것인지" 한 문장으로 목적을 명확하게 서술
-- 사전조건: 번호 매겨서 테스트 실행 전 반드시 세팅되어야 할 상태를 명시
-- 테스트단계: 번호 매겨서 UI 기준으로 원자적이고 구체적인 조작 순서 작성
-- 기대결과: 눈으로 판별 가능한 팩트 위주로 작성하며 반드시 "~됨" 또는 "~함" 으로 단정적으로 끝낼 것
+- 테스트유형: 반드시 "{test_type}" 으로 고정
+- 사전조건/테스트단계: 번호 매겨서 구체적으로 작성
+- 기대결과: "~됨" 또는 "~함" 으로 끝낼 것
+- {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
 
-반드시 아래 JSON 배열 형식으로만 응답하세요. 마크다운 없이 JSON만 출력하세요.
+JSON 배열만 출력하세요. 마크다운 없이.
 
 [
   {{
-    "tc_id": "TC_PAY_001",
-    "대분류": "주문/결제",
-    "소분류": "쿠폰 적용",
-    "테스트유형": "기능",
-    "우선순위": "High",
-    "테스트시나리오": "유효한 쿠폰 코드 입력 시 할인 금액이 정상 적용되는지 검증",
-    "사전조건": "1. 로그인 완료 상태\\n2. 유효한 쿠폰 'SAVE10' 보유\\n3. 장바구니에 10,000원 이상 상품 담김",
-    "테스트단계": "1. 결제창에서 쿠폰 입력란 클릭\\n2. 'SAVE10' 입력\\n3. [적용] 버튼 클릭",
-    "기대결과": "할인 금액이 차감된 최종 결제 금액이 표시됨"
-  }},
-  {{
-    "tc_id": "TC_PAY_002",
-    "대분류": "주문/결제",
-    "소분류": "쿠폰 적용",
-    "테스트유형": "예외처리",
-    "우선순위": "High",
-    "테스트시나리오": "만료된 쿠폰 코드 입력 시 결제 적용 차단 및 얼럿 전시 검증",
-    "사전조건": "1. 로그인 완료 상태\\n2. 만료된 쿠폰 'EXP50' 보유",
-    "테스트단계": "1. 결제창에서 쿠폰 입력란 클릭\\n2. 'EXP50' 입력\\n3. [적용] 버튼 클릭",
-    "기대결과": "\\"만료된 쿠폰입니다.\\" 안내 팝업이 노출되며 결제 금액이 차감되지 않음"
+    "tc_id": "TC_AUTH_{start_idx:03d}",
+    "대분류": "...",
+    "소분류": "...",
+    "테스트유형": "{test_type}",
+    "우선순위": "High/Medium/Low",
+    "테스트시나리오": "...",
+    "사전조건": "1. ...\\n2. ...",
+    "테스트단계": "1. ...\\n2. ...\\n3. ...",
+    "기대결과": "...됨"
   }}
-]""",
-            },
-        ],
-    )
+]"""
+
+    import time
+    response = None
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
+                            "지정된 테스트 유형과 개수를 반드시 지켜서 TC를 작성합니다. "
+                            "테스트 단계는 UI 기준으로 원자적이고 명확하게 작성하세요. "
+                            "기대결과는 눈으로 판별 가능한 팩트로, '~됨' 또는 '~함'으로 끝내세요. "
+                            "한국어로만 작성하세요."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=3000,
+            )
+            break
+        except Exception as e:
+            e_str = str(e).lower()
+            is_daily = "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str
+            if is_daily:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과 — 내일 다시 시도하세요") from e
+            if "rate_limit" in e_str or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"    [Rate Limit/분당] {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
+
+    if response is None:
+        print(f"    [오류] {test_type} Rate Limit 재시도 소진 — 건너뜀")
+        return []
 
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -304,8 +487,130 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        print(f"  [경고] JSON 파싱 실패")
-        return [{"tc_id": "TC-ERROR", "대분류": "", "소분류": "", "테스트유형": "", "우선순위": "", "테스트시나리오": raw, "사전조건": "", "테스트단계": "", "기대결과": ""}]
+        print(f"    [경고] {test_type} JSON 파싱 실패 (응답: {raw[:200]}...)")
+        return []
+
+
+def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
+    """기획서/스펙 복잡도를 분석해 테스트 유형별 적정 TC 수를 결정합니다."""
+    import time
+    type_map = {
+        "Bug": "Bug", "버그": "Bug",
+        "Story": "Story", "스토리": "Story",
+        "Task": "Task", "작업": "Task",
+        "Epic": "Epic", "에픽": "Epic",
+    }
+    issue_type = type_map.get(issue["issue_type"], "Story")
+
+    minimums = {
+        "Bug":   {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 3},
+        "Story": {"기능": 3, "예외처리": 3, "경계값": 2, "회귀": 2, "보안": 1, "UI/UX": 1},
+        "Task":  {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 1},
+        "Epic":  {"기능": 4, "예외처리": 3, "경계값": 3, "회귀": 3, "보안": 2},
+    }.get(issue_type, {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 2})
+
+    min_desc = "\n".join([f"  - {t}: 최소 {n}개" for t, n in minimums.items()])
+    context_block = f"\n\n[기획서/스펙]\n{context}" if context else ""
+
+    prompt = f"""다음 티켓과 기획서를 분석해서 테스트 유형별로 몇 개의 TC가 필요한지 결정하세요.
+
+[티켓]
+유형: {issue['issue_type']} | 제목: {issue['summary']}
+
+[추론된 요구사항]
+{augmented_spec}{context_block}
+
+[최솟값 — 반드시 지킬 것]
+{min_desc}
+
+판단 기준:
+- 화면/입력 필드가 많을수록 경계값/예외처리 증가
+- 정책/비즈니스 룰이 복잡할수록 기능/예외처리 증가
+- 연관 기능이 많을수록 회귀 증가
+- 보안·권한 처리가 있으면 보안 포함
+
+아래 JSON 형식으로만 응답하세요. 마크다운 없이.
+{{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자}}
+
+보안/UI/UX가 불필요하면 0으로 설정하세요."""
+
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
+                            "기획서 복잡도를 분석해 테스트 유형별 적정 TC 수를 판단합니다. "
+                            "과도하게 적거나 많지 않게, 실무 기준으로 판단하세요. "
+                            "JSON만 출력하세요."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=200,
+            )
+            break
+        except Exception as e:
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
+            if "rate_limit" in e_str or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"    [Rate Limit/분당] {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
+
+    if response is None:
+        print("  [오류] 플랜 분석 Rate Limit 재시도 소진 — 기본값 사용")
+        return [(t, n) for t, n in minimums.items()]
+
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        plan_dict = json.loads(raw)
+        plan = []
+        for t, min_n in minimums.items():
+            n = max(int(plan_dict.get(t, min_n)), min_n)
+            plan.append((t, n))
+        for t, n in plan_dict.items():
+            if t not in minimums and int(n) > 0:
+                plan.append((t, int(n)))
+        return plan
+    except (json.JSONDecodeError, ValueError):
+        print("  [경고] 플랜 분석 실패 — 기본값 사용")
+        return [(t, n) for t, n in minimums.items()]
+
+
+def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
+    """스펙 복잡도 분석 후 유형별로 TC를 생성합니다."""
+    print(f"  스펙 분석 중 (TC 플랜 결정)...")
+    plan = analyze_spec_for_plan(groq_client, issue, augmented_spec, context)
+    total = sum(n for _, n in plan)
+    plan_str = " + ".join([f"{t} {n}개" for t, n in plan])
+    print(f"  플랜 확정: {plan_str} = 총 {total}개")
+
+    all_tcs = []
+    idx = 1
+
+    for test_type, count in plan:
+        print(f"    [{test_type}] {count}개 생성 중...")
+        try:
+            batch = _call_tc_api(groq_client, issue, augmented_spec, context, test_type, count, idx)
+        except DailyTokenLimitError as e:
+            print(f"    [일일 한도 초과] {e}")
+            print(f"    지금까지 생성된 {len(all_tcs)}개 TC로 저장합니다.")
+            break
+        print(f"    [{test_type}] {len(batch)}개 완료")
+        all_tcs.extend(batch)
+        idx += len(batch)
+
+    return all_tcs
 
 
 # ── 구글 시트 결과 저장 (append) ──────────────────────────────────────
@@ -376,39 +681,59 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
 
     if rows_to_add:
         ws.update(rows_to_add, "A3")
+        end_row = 3 + len(rows_to_add)
 
-        # 우선순위 색상 (E열)
+        # 데이터 셀 정렬: 세로=가운데, 가로=왼쪽
+        ws.format(f"A3:L{end_row - 1}", {
+            "verticalAlignment": "MIDDLE",
+            "horizontalAlignment": "LEFT",
+            "wrapStrategy": "WRAP",
+        })
+
+        # 우선순위 색상 (E열만)
         for i, tc in enumerate(tc_list):
             color = priority_colors.get(tc.get("우선순위", ""))
             if color:
                 ws.format(f"E{3 + i}", {"backgroundColor": color})
 
-        # 테스트 상태 드롭다운 (K열, 0-indexed col 10): P / F / B / N/A
-        end_row = 3 + len(rows_to_add)
-        sh.batch_update({"requests": [{
-            "setDataValidation": {
-                "range": {
-                    "sheetId": ws.id,
-                    "startRowIndex": 2,
-                    "endRowIndex": end_row,
-                    "startColumnIndex": 10,
-                    "endColumnIndex": 11,
-                },
-                "rule": {
-                    "condition": {
-                        "type": "ONE_OF_LIST",
-                        "values": [
-                            {"userEnteredValue": "P"},
-                            {"userEnteredValue": "F"},
-                            {"userEnteredValue": "B"},
-                            {"userEnteredValue": "N/A"},
-                        ],
+        # 기존 드롭다운 초기화 후 테스트 상태(K열) 드롭다운 재설정
+        sh.batch_update({"requests": [
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 2,
+                        "endRowIndex": end_row,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 12,
                     },
-                    "showCustomUi": True,
-                    "strict": False,
-                },
-            }
-        }]})
+                }
+            },
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 2,
+                        "endRowIndex": end_row,
+                        "startColumnIndex": 10,
+                        "endColumnIndex": 11,
+                    },
+                    "rule": {
+                        "condition": {
+                            "type": "ONE_OF_LIST",
+                            "values": [
+                                {"userEnteredValue": "P"},
+                                {"userEnteredValue": "F"},
+                                {"userEnteredValue": "B"},
+                                {"userEnteredValue": "N/A"},
+                            ],
+                        },
+                        "showCustomUi": True,
+                        "strict": False,
+                    },
+                }
+            },
+        ]})
 
     # 열 너비 설정
     requests_body = [{"updateDimensionProperties": {
@@ -534,11 +859,23 @@ def main():
 
         print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
 
+        # spec 파일 자동 탐색 또는 생성
+        spec_context = get_or_generate_spec(groq_client, issue, context)
+
         # TC 생성
         print(f"  요구사항 추론 중...")
-        augmented_spec = augment_ticket_spec(groq_client, issue, context)
+        try:
+            augmented_spec = augment_ticket_spec(groq_client, issue, spec_context)
+        except Exception as e:
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 티켓 처리 중단")
+                ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
+                ws_input.update_cell(row_idx, 3, timestamp)
+                break
+            raise
         print(f"  TC 생성 중...")
-        tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
+        tc_list = generate_test_cases(groq_client, issue, augmented_spec, spec_context)
         tc_list = filter_tc_list(tc_list)
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:

@@ -36,6 +36,10 @@ from jira import JIRA
 from groq import Groq
 from dotenv import load_dotenv
 
+
+class DailyTokenLimitError(Exception):
+    pass
+
 load_dotenv()
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -177,6 +181,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
 ]"""
 
     import time
+    response = None
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
@@ -198,12 +203,20 @@ JSON 배열만 출력하세요. 마크다운 없이.
             )
             break
         except Exception as e:
-            if "rate_limit" in str(e).lower() or "429" in str(e):
+            e_str = str(e).lower()
+            is_daily = "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str
+            if is_daily:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과 — 내일 다시 시도하세요") from e
+            if "rate_limit" in e_str or "429" in str(e):
                 wait = 65 * (attempt + 1)
-                print(f"    [Rate Limit] {wait}초 대기 후 재시도...")
+                print(f"    [Rate Limit/분당] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:
                 raise
+
+    if response is None:
+        print(f"    [오류] {test_type} Rate Limit 재시도 소진 — 건너뜀")
+        return []
 
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -212,7 +225,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        print(f"    [경고] {test_type} JSON 파싱 실패")
+        print(f"    [경고] {test_type} JSON 파싱 실패 (응답: {raw[:200]}...)")
         return []
 
 
@@ -260,6 +273,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 보안/UI/UX가 불필요하면 0으로 설정하세요."""
 
     import time
+    response = None
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
@@ -280,12 +294,19 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
             )
             break
         except Exception as e:
-            if "rate_limit" in str(e).lower() or "429" in str(e):
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
+            if "rate_limit" in e_str or "429" in str(e):
                 wait = 65 * (attempt + 1)
-                print(f"    [Rate Limit] {wait}초 대기 후 재시도...")
+                print(f"    [Rate Limit/분당] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:
                 raise
+
+    if response is None:
+        print("  [오류] 플랜 분석 Rate Limit 재시도 소진 — 기본값 사용")
+        return [(t, n) for t, n in minimums.items()]
 
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -322,7 +343,12 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
 
     for test_type, count in plan:
         print(f"    [{test_type}] {count}개 생성 중...")
-        batch = _call_tc_api(groq_client, issue, augmented_spec, context, test_type, count, idx)
+        try:
+            batch = _call_tc_api(groq_client, issue, augmented_spec, context, test_type, count, idx)
+        except DailyTokenLimitError as e:
+            print(f"    [일일 한도 초과] {e}")
+            print(f"    지금까지 생성된 {len(all_tcs)}개 TC로 저장합니다.")
+            break
         print(f"    [{test_type}] {len(batch)}개 완료")
         all_tcs.extend(batch)
         idx += len(batch)
@@ -393,8 +419,7 @@ def save_excel(results: list, output_path: str):
     header_font  = Font(bold=True, color="FFFFFF")
     header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    center_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
-    top_align    = Alignment(vertical="top", wrap_text=True)
+    data_align   = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     priority_fills = {
         "High":   PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid"),
@@ -428,22 +453,22 @@ def save_excel(results: list, output_path: str):
         # 행 3~: TC 데이터
         last_row = 2 + len(item["test_cases"])
         for r_idx, tc in enumerate(item["test_cases"], start=3):
-            ws.cell(row=r_idx, column=1,  value=tc.get("tc_id", "")).alignment = center_align
-            ws.cell(row=r_idx, column=2,  value=tc.get("대분류", "")).alignment = center_align
-            ws.cell(row=r_idx, column=3,  value=tc.get("소분류", "")).alignment = center_align
-            ws.cell(row=r_idx, column=4,  value=tc.get("테스트유형", "")).alignment = center_align
+            ws.cell(row=r_idx, column=1,  value=tc.get("tc_id", "")).alignment = data_align
+            ws.cell(row=r_idx, column=2,  value=tc.get("대분류", "")).alignment = data_align
+            ws.cell(row=r_idx, column=3,  value=tc.get("소분류", "")).alignment = data_align
+            ws.cell(row=r_idx, column=4,  value=tc.get("테스트유형", "")).alignment = data_align
             priority = tc.get("우선순위", "")
             p_cell = ws.cell(row=r_idx, column=5, value=priority)
-            p_cell.alignment = center_align
+            p_cell.alignment = data_align
             if priority in priority_fills:
                 p_cell.fill = priority_fills[priority]
-            ws.cell(row=r_idx, column=6,  value=tc.get("테스트시나리오", "")).alignment = top_align
-            ws.cell(row=r_idx, column=7,  value=tc.get("사전조건", "")).alignment = top_align
-            ws.cell(row=r_idx, column=8,  value=tc.get("테스트단계", "")).alignment = top_align
-            ws.cell(row=r_idx, column=9,  value=tc.get("기대결과", "")).alignment = top_align
-            ws.cell(row=r_idx, column=10, value="").alignment = top_align    # 실제 결과
-            ws.cell(row=r_idx, column=11, value="").alignment = center_align  # 테스트 상태
-            ws.cell(row=r_idx, column=12, value="").alignment = top_align    # 연결 버그/비고
+            ws.cell(row=r_idx, column=6,  value=tc.get("테스트시나리오", "")).alignment = data_align
+            ws.cell(row=r_idx, column=7,  value=tc.get("사전조건", "")).alignment = data_align
+            ws.cell(row=r_idx, column=8,  value=tc.get("테스트단계", "")).alignment = data_align
+            ws.cell(row=r_idx, column=9,  value=tc.get("기대결과", "")).alignment = data_align
+            ws.cell(row=r_idx, column=10, value="").alignment = data_align   # 실제 결과
+            ws.cell(row=r_idx, column=11, value="").alignment = data_align   # 테스트 상태
+            ws.cell(row=r_idx, column=12, value="").alignment = data_align   # 연결 버그/비고
             ws.row_dimensions[r_idx].height = 70
 
         # 테스트 상태 드롭다운 (K열): P / F / B / N/A
@@ -563,39 +588,59 @@ def save_to_sheets(results: list, sheet_id: str):
             ])
         if rows_data:
             ws.update(rows_data, "A3")
+            end_row = 3 + len(rows_data)
 
-            # 우선순위 색상 (E열, col 4)
+            # 데이터 셀 정렬: 세로=가운데, 가로=왼쪽
+            ws.format(f"A3:L{end_row - 1}", {
+                "verticalAlignment": "MIDDLE",
+                "horizontalAlignment": "LEFT",
+                "wrapStrategy": "WRAP",
+            })
+
+            # 우선순위 색상 (E열만)
             for i, tc in enumerate(item["test_cases"]):
                 color = priority_colors.get(tc.get("우선순위", ""))
                 if color:
                     ws.format(f"E{3 + i}", {"backgroundColor": color})
 
-            # 테스트 상태 드롭다운 (K열, 0-indexed col 10): P / F / B / N/A
-            end_row = 3 + len(rows_data)
-            sh.batch_update({"requests": [{
-                "setDataValidation": {
-                    "range": {
-                        "sheetId": ws.id,
-                        "startRowIndex": 2,
-                        "endRowIndex": end_row,
-                        "startColumnIndex": 10,
-                        "endColumnIndex": 11,
-                    },
-                    "rule": {
-                        "condition": {
-                            "type": "ONE_OF_LIST",
-                            "values": [
-                                {"userEnteredValue": "P"},
-                                {"userEnteredValue": "F"},
-                                {"userEnteredValue": "B"},
-                                {"userEnteredValue": "N/A"},
-                            ],
+            # 기존 드롭다운 초기화 후 테스트 상태(K열) 드롭다운 재설정
+            sh.batch_update({"requests": [
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 2,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 12,
                         },
-                        "showCustomUi": True,
-                        "strict": False,
-                    },
-                }
-            }]})
+                    }
+                },
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 2,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 10,
+                            "endColumnIndex": 11,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": "P"},
+                                    {"userEnteredValue": "F"},
+                                    {"userEnteredValue": "B"},
+                                    {"userEnteredValue": "N/A"},
+                                ],
+                            },
+                            "showCustomUi": True,
+                            "strict": False,
+                        },
+                    }
+                },
+            ]})
 
             # 열 너비 설정
             requests_body = [{"updateDimensionProperties": {
@@ -657,6 +702,11 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
             "status": issue["status"],
             "test_cases": tc_list,
         })
+
+        if idx < total:
+            import time
+            print(f"  다음 티켓까지 30초 대기...")
+            time.sleep(30)
 
     return results
 

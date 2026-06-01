@@ -28,7 +28,9 @@ Jira REST API로 티켓 정보 조회
               ↓
 Groq AI — 1단계: 티켓 설명 보완 (요구사항 추론)
               ↓
-Groq AI — 2단계: 매뉴얼 TC 생성 (JSON)
+Groq AI — 2단계: 스펙 복잡도 분석 → 테스트 유형별 TC 수 동적 결정
+              ↓
+Groq AI — 3단계: 유형별 분리 TC 생성 (기능 / 예외처리 / 경계값 / 회귀 / 보안 / UI/UX)
               ↓
 구글 시트에 티켓별 시트 생성 (TC ID / 테스트유형 / 단계 / 기대결과 / 결과 드롭다운)
               ↓
@@ -39,10 +41,11 @@ Slack 알림 발송 + 입력 시트 상태 '완료'로 업데이트
 
 ## 주요 기능
 
-### AI 2단계 파이프라인
+### AI 3단계 파이프라인
 - **1단계 (요구사항 추론)**: 설명이 부족한 티켓도 AI가 기능 목적 / 주요 요구사항 / 예외 케이스를 먼저 추론
-- **2단계 (TC 생성)**: 추론된 요구사항 기반으로 실무 수준의 TC 작성
-- 이슈 유형별 분기 (Bug / Story / Task / Epic)
+- **2단계 (동적 플랜 결정)**: 스펙 복잡도 분석 → 테스트 유형별 적정 TC 수 자동 결정 (고정값 아님)
+- **3단계 (유형별 TC 생성)**: 기능 / 예외처리 / 경계값 / 회귀 / 보안 / UI/UX 유형별 분리 생성
+- 이슈 유형별 최솟값 보장 (Bug / Story / Task / Epic)
 
 ### 생성 TC 품질
 - 테스트유형 자동 분류: 기능 / 예외처리 / 경계값 / 회귀 / 보안
@@ -80,11 +83,15 @@ Slack 알림 발송 + 입력 시트 상태 '완료'로 업데이트
 ```
 AutoTC/
 ├── src/
+│   ├── generate_tc.py       # 단일/일괄 TC 생성 (CLI) — 동적 플랜 포함
 │   ├── watch_sheet.py       # 구글 시트 폴링 + TC 자동 생성 (메인)
-│   ├── generate_tc.py       # 단일/일괄 TC 생성 (CLI)
-│   └── generate_context.py  # 서비스 컨텍스트 초안 AI 생성
+│   ├── generate_spec.py     # 티켓 기반 기획서 자동 생성
+│   ├── generate_context.py  # 서비스 컨텍스트 초안 AI 생성
+│   ├── slack_app.py         # Slack 슬래시 커맨드 (/review, /spec-review)
+│   └── utils.py             # 공통 유틸 (한글 외 문자 필터링 등)
 ├── contexts/
-│   └── kream.md             # 서비스 컨텍스트 예시
+│   ├── kurly.md             # 마켓컬리 서비스 컨텍스트
+│   └── kream.md             # 크림 서비스 컨텍스트
 ├── reports/                 # TC JSON, 엑셀 출력
 ├── .github/workflows/
 │   └── watch.yml            # GitHub Actions 스케줄 실행
@@ -106,12 +113,16 @@ pip install -r requirements.txt
 cp .env.example .env
 # .env 파일에 API 키 입력
 
-# 3. 구글 시트 폴링 실행
-python src/watch_sheet.py
-
-# 4. 단일 티켓 TC 생성 (CLI)
+# 3. 단일 티켓 TC 생성
 python src/generate_tc.py MKQA-1
-python src/generate_tc.py MKQA-1 --context kream
+python src/generate_tc.py MKQA-1 --context kurly   # 서비스 컨텍스트 적용
+
+# 4. 엑셀 일괄 처리 (A열에 티켓 키 목록)
+python src/generate_tc.py --template               # 입력 템플릿 생성
+python src/generate_tc.py tickets.xlsx --context kurly
+
+# 5. 구글 시트 폴링 실행
+python src/watch_sheet.py
 ```
 
 ### GitHub Actions 자동 실행
