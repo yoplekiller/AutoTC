@@ -120,8 +120,8 @@ def run_ticket(description: str, issue_type: str, response_url: str):
         ticket_data = generate_ticket_content(groq_client, description, issue_type or None)
         result = create_jira_ticket(ticket_data, os.getenv("JIRA_PROJECT_KEY", "MKQA"))
 
-        type_emoji = {"Bug": ":bug:", "Story": ":book:", "Task": ":white_check_mark:"}.get(result["issue_type"], ":pushpin:")
-        priority_emoji = {"High": ":red_circle:", "Medium": ":yellow_circle:", "Low": ":green_circle:"}.get(result["priority"], "")
+        type_emoji = {"Bug": "🐛", "Story": "📖", "Task": "✅"}.get(result["issue_type"], "📌")
+        priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(result["priority"], "")
 
         reply(response_url,
             f"{type_emoji} *Jira 티켓 생성 완료*\n"
