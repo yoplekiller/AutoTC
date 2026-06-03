@@ -104,3 +104,72 @@ Task일 경우:
     raw = response.choices[0].message.content.strip()
     # 마크다운 코드 블록 제거용 정규식 가다듬기
     raw = re.sub(r"^```json\s*|\s*```$", "", raw, flags=re.MULTILINE)
+    raw = raw.strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {
+            "summary": description[:100],
+            "issue_type": issue_type or "Task",
+            "priority": "Medium",
+            "sections": [{"heading": "설명", "content": description}],
+            "acceptance_criteria": [],
+        }
+
+    return sanitize(data)
+
+
+def _build_description(data: dict) -> str:
+    """sections와 acceptance_criteria를 Jira 텍스트로 변환합니다."""
+    lines = []
+
+    for section in data.get("sections", []):
+        heading = section.get("heading", "")
+        content = section.get("content", "")
+        if heading:
+            lines.append(f"*{heading}*")
+        if isinstance(content, list):
+            lines.extend(str(item) for item in content)
+        else:
+            lines.append(str(content))
+        lines.append("")
+
+    criteria = data.get("acceptance_criteria", [])
+    if criteria:
+        lines.append("*완료 기준 (AC)*")
+        for ac in criteria:
+            lines.append(f"* {ac}")
+
+    return "\n".join(lines).strip()
+
+
+def create_jira_ticket(ticket_data: dict, project_key: str = None) -> dict:
+    """Jira REST API로 실제 티켓을 생성하고 결과를 반환합니다."""
+    project_key = project_key or JIRA_PROJECT_KEY
+
+    jira = JIRA(
+        server=JIRA_URL,
+        basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN),
+    )
+
+    issue_type = ticket_data.get("issue_type", "Task")
+    priority   = ticket_data.get("priority", "Medium")
+    summary    = ticket_data.get("summary", "제목 없음")
+    description = _build_description(ticket_data)
+
+    new_issue = jira.create_issue(fields={
+        "project":     {"key": project_key},
+        "summary":     summary,
+        "issuetype":   {"name": issue_type},
+        "priority":    {"name": priority},
+        "description": description,
+    })
+
+    return {
+        "key":        new_issue.key,
+        "url":        f"{JIRA_URL}/browse/{new_issue.key}",
+        "summary":    summary,
+        "issue_type": issue_type,
+        "priority":   priority,
+    }
