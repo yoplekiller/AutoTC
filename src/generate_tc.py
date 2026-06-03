@@ -96,23 +96,27 @@ def load_context(context_name: str) -> str:
 # 티켓 설명 보완 및 요구사항 추론
 def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> str:
     """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다."""
+    import time
     context_section = f"\n\n[서비스 컨텍스트]\n{context}" if context else ""
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 시니어 QA 엔지니어입니다. "
-                    "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
-                    "서비스 컨텍스트가 제공된 경우 이를 적극 반영하세요. "
-                    "반드시 순수한 한국어로만 작성하세요. 한국어, 숫자, 영문 외 다른 언어(중국어, 일본어, 러시아어 등)는 절대 사용하지 마세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"""아래 Jira 티켓 정보를 보고 테스트 관점의 요구사항을 추론해주세요.
+    response = None
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 시니어 QA 엔지니어입니다. "
+                            "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
+                            "서비스 컨텍스트가 제공된 경우 이를 적극 반영하세요. "
+                            "반드시 순수한 한국어로만 작성하세요."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""아래 Jira 티켓 정보를 보고 테스트 관점의 요구사항을 추론해주세요.
 
 티켓 유형: {issue['issue_type']}
 티켓 제목: {issue['summary']}
@@ -125,9 +129,24 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
 4. 보안·권한 고려사항 (해당 시)
 
 설명 없이 위 형식만 출력하세요.""",
-            },
-        ],
-    )
+                    },
+                ],
+            )
+            break
+        except Exception as e:
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과 — 내일 다시 시도하세요") from e
+            if "rate_limit" in e_str or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"  [Rate Limit/분당] augment {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
+
+    if response is None:
+        raise RuntimeError("augment_ticket_spec Rate Limit 재시도 소진")
+
     return response.choices[0].message.content.strip()
 
 # TC 생성 (단일 유형)
@@ -199,7 +218,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=3000,
+                max_tokens=6000,
             )
             break
         except Exception as e:
@@ -225,6 +244,18 @@ JSON 배열만 출력하세요. 마크다운 없이.
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # JSON이 잘린 경우 복구 시도: 마지막 완전한 객체까지만 파싱
+        last_brace = raw.rfind("},")
+        if last_brace == -1:
+            last_brace = raw.rfind("}")
+        if last_brace > 0:
+            recovered = raw[:last_brace + 1].rstrip(",") + "\n]"
+            try:
+                result = json.loads("[" + recovered if not recovered.startswith("[") else recovered)
+                print(f"    [복구] {test_type} JSON 잘림 감지 — {len(result)}개 복구됨")
+                return result
+            except json.JSONDecodeError:
+                pass
         print(f"    [경고] {test_type} JSON 파싱 실패 (응답: {raw[:200]}...)")
         return []
 
@@ -247,7 +278,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
         "Epic":  {"기능": 4, "예외처리": 3, "경계값": 3, "회귀": 3, "보안": 2},
     }.get(issue_type, {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 2})
 
-    min_desc = "\n".join([f"  - {t}: 최소 {n}개" for t, n in minimums.items()])
+    min_desc = "\n".join([f"  - {t}: 최소 {n}개 (단순 티켓 기준)" for t, n in minimums.items()])
     context_block = f"\n\n[기획서/스펙]\n{context}" if context else ""
 
     prompt = f"""다음 티켓과 기획서를 분석해서 테스트 유형별로 몇 개의 TC가 필요한지 결정하세요.
@@ -258,19 +289,21 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 [추론된 요구사항]
 {augmented_spec}{context_block}
 
-[최솟값 — 반드시 지킬 것]
+[기준값 — 단순한 티켓의 최솟값이며, 복잡한 티켓은 반드시 더 많이 배정할 것]
 {min_desc}
 
-판단 기준:
-- 화면/입력 필드가 많을수록 경계값/예외처리 증가
-- 정책/비즈니스 룰이 복잡할수록 기능/예외처리 증가
-- 연관 기능이 많을수록 회귀 증가
-- 보안·권한 처리가 있으면 보안 포함
+복잡도에 따른 증가 기준 (아래 조건이 많을수록 해당 유형 수 증가):
+- 화면/입력 필드 3개 이상 → 경계값 +2~3, 예외처리 +2
+- 정책/비즈니스 룰 2개 이상 → 기능 +2~3, 예외처리 +2
+- 연관 기능/화면 2개 이상 → 회귀 +2~3
+- 인증·권한·결제 포함 → 보안 3~5
+- 사용자 입력 UI 있음 → UI/UX 2~4
+- 복잡한 티켓의 경우 각 유형별 기준값의 1.5~2배를 목표로 설정
 
 아래 JSON 형식으로만 응답하세요. 마크다운 없이.
 {{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자}}
 
-보안/UI/UX가 불필요하면 0으로 설정하세요."""
+보안/UI/UX가 완전히 불필요하면 0으로 설정하세요."""
 
     import time
     response = None
@@ -314,10 +347,14 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 
     try:
         plan_dict = json.loads(raw)
+        print(f"  [AI 플랜] {json.dumps(plan_dict, ensure_ascii=False)}")
         # 최솟값 보장 + 0인 유형 제외
         plan = []
         for t, min_n in minimums.items():
-            n = max(int(plan_dict.get(t, min_n)), min_n)
+            ai_n = int(plan_dict.get(t, min_n))
+            n = max(ai_n, min_n)
+            if ai_n < min_n:
+                print(f"  [플랜 보정] {t}: AI={ai_n} → 최솟값={min_n} 적용")
             plan.append((t, n))
         # 최솟값에 없는 유형(보안, UI/UX 등) 추가
         for t, n in plan_dict.items():
@@ -325,7 +362,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
                 plan.append((t, int(n)))
         return plan
     except (json.JSONDecodeError, ValueError):
-        print("  [경고] 플랜 분석 실패 — 기본값 사용")
+        print(f"  [경고] 플랜 분석 실패 (응답: {raw[:100]}) — 기본값 사용")
         return [(t, n) for t, n in minimums.items()]
 
 
@@ -688,7 +725,12 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
 
         print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
         print(f"  요구사항 추론 중...")
-        augmented_spec = augment_ticket_spec(groq_client, issue, context)
+        try:
+            augmented_spec = augment_ticket_spec(groq_client, issue, context)
+        except DailyTokenLimitError as e:
+            print(f"  [일일 한도 초과] {e}")
+            print(f"  지금까지 처리된 {len(results)}개 티켓 결과로 저장합니다.")
+            break
         print(f"  TC 생성 중...")
         tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
         tc_list = filter_tc_list(tc_list)

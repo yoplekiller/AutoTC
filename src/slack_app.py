@@ -38,11 +38,17 @@ from groq import Groq
 
 load_dotenv()
 
-# Slack 및 AI 클라이언트 초기화
-app = App(
-    token=os.getenv("SLACK_BOT_TOKEN"),
-    signing_secret=os.getenv("SLACK_SIGNING_SECRET")
-)
+# Slack 및 AI 클라이언트 초기화 (토큰 미설정 시 graceful 처리)
+try:
+    bolt_app = App(
+        token=os.getenv("SLACK_BOT_TOKEN"),
+        signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
+    )
+except Exception as e:
+    print(f"[경고] Slack Bolt 초기화 실패 (SLACK_BOT_TOKEN 미설정?): {e}")
+    bolt_app = None
+
+app = bolt_app  # __main__ 블록 호환용
 
 JIRA_URL = os.getenv("JIRA_URL", "")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")  # 기본으로 업데이트할 스프레드시트 ID
@@ -377,21 +383,11 @@ def execute_lazy_review_analysis(command, respond, client):
         respond(f"❌ *오류 발생:* 기획 분석 스캔을 처리하지 못했습니다.\n`사유: {str(err)}`")
 
 
-# 슬랙 앱 커맨드 등록 (ack와 lazy 분리를 통해 슬랙 타임아웃 100% 회피)
-app.command("/tc")(
-    ack=ack_tc_command,
-    lazy=[execute_lazy_tc_generation]
-)
-
-# /review 커맨드 및 별칭 커맨드 등록
-app.command("/review")(
-    ack=ack_review_command,
-    lazy=[execute_lazy_review_analysis]
-)
-app.command("/spec-review")(
-    ack=ack_review_command,
-    lazy=[execute_lazy_review_analysis]
-)
+# 슬랙 앱 커맨드 등록 (ack + lazy 분리 → Slack 3초 타임아웃 회피)
+if bolt_app:
+    bolt_app.command("/tc")(ack=ack_tc_command, lazy=[execute_lazy_tc_generation])
+    bolt_app.command("/review")(ack=ack_review_command, lazy=[execute_lazy_review_analysis])
+    bolt_app.command("/spec-review")(ack=ack_review_command, lazy=[execute_lazy_review_analysis])
 
 
 # ── 실행 진입점 ─────────────────────────────────────────────────────

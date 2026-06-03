@@ -6,7 +6,6 @@ import argparse
 import requests
 from jira import JIRA
 from groq import Groq
-import google.generativeai as genai
 from dotenv import load_dotenv
 
 # 상위 폴더의 src.utils 모듈을 가져오기 위한 경로 설정 및 예외 처리
@@ -27,11 +26,6 @@ JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
 JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "MKQA")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
-# 제미나이 초기화
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 
 def generate_ticket_content(groq_client: Groq, description: str, issue_type: str = None) -> dict:
