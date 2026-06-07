@@ -26,6 +26,7 @@ import os
 import json
 import argparse
 from datetime import datetime
+from difflib import SequenceMatcher
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
@@ -156,7 +157,14 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
     type_guide = {
         "기능":     "정상적인 사용 흐름(Happy Path) — 기능이 올바르게 작동하는 시나리오",
         "예외처리": "오류 입력, 권한 없음, 서버 오류, 네트워크 오류 등 비정상 흐름",
-        "경계값":   "최솟값/최댓값, 빈값, 공백, 특수문자, 글자 수 한계 등 경계 조건",
+        "경계값":   (
+            "입력 필드의 데이터 타입에 맞는 경계 조건만 작성 — "
+            "텍스트/코드형(쿠폰코드, 닉네임 등): 글자 수 상한/하한, 공백, 특수문자, 대소문자, 다국어; "
+            "숫자형(수량, 금액 등): 최솟값/최댓값/0/음수/소수점; "
+            "날짜·시간형: 과거/미래/형식 오류/만료 시점; "
+            "선택형(체크박스, 드롭다운 등): 미선택/중복 선택/전체 선택. "
+            "필드의 실제 데이터 타입과 맞지 않는 케이스(예: 코드 문자열에 최솟값/최댓값)는 작성하지 말 것"
+        ),
         "회귀":     "이 기능 변경으로 영향받을 수 있는 연관 기능의 정상 동작 검증",
         "보안":     "인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등 보안 취약점",
         "UI/UX":    "버튼 활성화 상태, 에러 메시지 문구, 화면 전환, 로딩 표시 등 UI 동작",
@@ -176,18 +184,17 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 {augmented_spec}{context_block}
 
 [작성 지침]
-- tc_id: TC_{{모듈}}_{{3자리}} 형식, {start_idx:03d}번부터 시작
-  모듈 코드: AUTH(회원인증), CART(장바구니), PAY(주문/결제), MY(마이페이지), SEARCH(검색), PROD(상품), HOME(홈), FUNC(기타)
+- tc_id: 반드시 "TC_{{3자리}}" 형식 고정 (모듈 구분 없이), {start_idx:03d}번부터 시작
 - 테스트유형: 반드시 "{test_type}" 으로 고정
 - 사전조건/테스트단계: 번호 매겨서 구체적으로 작성
-- 기대결과: "~됨" 또는 "~함" 으로 끝낼 것
+- 기대결과: "~됨" 또는 "~함" 으로 끝낼 것 (예: "노출됨", "표시됨" — "나타남" 같은 표현은 사용 금지)
 - {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
 
 JSON 배열만 출력하세요. 마크다운 없이.
 
 [
   {{
-    "tc_id": "TC_AUTH_{start_idx:03d}",
+    "tc_id": "TC_{start_idx:03d}",
     "대분류": "...",
     "소분류": "...",
     "테스트유형": "{test_type}",
@@ -211,6 +218,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
                         "content": (
                             "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
                             "지정된 테스트 유형과 개수를 반드시 지켜서 TC를 작성합니다. "
+                            "각 TC는 서로 중복되지 않는 고유한 시나리오여야 합니다. "
                             "테스트 단계는 UI 기준으로 원자적이고 명확하게 작성하세요. "
                             "기대결과는 눈으로 판별 가능한 팩트로, '~됨' 또는 '~함'으로 끝내세요. "
                             "한국어로만 작성하세요."
@@ -271,14 +279,13 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
     }
     issue_type = type_map.get(issue["issue_type"], "Story")
 
-    minimums = {
-        "Bug":   {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 3},
-        "Story": {"기능": 3, "예외처리": 3, "경계값": 2, "회귀": 2, "보안": 1, "UI/UX": 1},
-        "Task":  {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 1},
-        "Epic":  {"기능": 4, "예외처리": 3, "경계값": 3, "회귀": 3, "보안": 2},
-    }.get(issue_type, {"기능": 3, "예외처리": 2, "경계값": 2, "회귀": 2})
-
-    min_desc = "\n".join([f"  - {t}: 최소 {n}개 (단순 티켓 기준)" for t, n in minimums.items()])
+    type_guides = {
+        "Bug":   "기능 5개 이상, 예외처리 5개 이상, 경계값 4개 이상, 회귀 5개 이상",
+        "Story": "기능 6개 이상, 예외처리 6개 이상, 경계값 5개 이상, 회귀 5개 이상, 보안 3개 이상(인증/결제 포함 시 5개 이상), UI/UX 3개 이상",
+        "Task":  "기능 5개 이상, 예외처리 4개 이상, 경계값 4개 이상, 회귀 3개 이상",
+        "Epic":  "기능 8개 이상, 예외처리 7개 이상, 경계값 6개 이상, 회귀 7개 이상, 보안 5개 이상",
+    }
+    type_guide_str = type_guides.get(issue_type, "기능 5개 이상, 예외처리 4개 이상, 경계값 4개 이상, 회귀 4개 이상")
     context_block = f"\n\n[기획서/스펙]\n{context}" if context else ""
 
     prompt = f"""다음 티켓과 기획서를 분석해서 테스트 유형별로 몇 개의 TC가 필요한지 결정하세요.
@@ -289,16 +296,16 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 [추론된 요구사항]
 {augmented_spec}{context_block}
 
-[기준값 — 단순한 티켓의 최솟값이며, 복잡한 티켓은 반드시 더 많이 배정할 것]
-{min_desc}
+[유형별 목표 수량 — 아래는 최소 기준이며, 티켓이 복잡할수록 더 많이 배정할 것]
+{type_guide_str}
 
-복잡도에 따른 증가 기준 (아래 조건이 많을수록 해당 유형 수 증가):
-- 화면/입력 필드 3개 이상 → 경계값 +2~3, 예외처리 +2
-- 정책/비즈니스 룰 2개 이상 → 기능 +2~3, 예외처리 +2
-- 연관 기능/화면 2개 이상 → 회귀 +2~3
-- 인증·권한·결제 포함 → 보안 3~5
-- 사용자 입력 UI 있음 → UI/UX 2~4
-- 복잡한 티켓의 경우 각 유형별 기준값의 1.5~2배를 목표로 설정
+복잡도에 따른 추가 배정 기준:
+- 화면/입력 필드 3개 이상 → 경계값 +3~5, 예외처리 +3
+- 정책/비즈니스 룰 2개 이상 → 기능 +3~5, 예외처리 +3
+- 연관 기능/화면 2개 이상 → 회귀 +3~5
+- 인증·권한·결제 포함 → 보안 5~8
+- 사용자 입력 UI 있음 → UI/UX 3~6
+- 빠진 케이스가 없도록 충분히 많이 배정하세요
 
 아래 JSON 형식으로만 응답하세요. 마크다운 없이.
 {{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자}}
@@ -316,8 +323,8 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
                         "role": "system",
                         "content": (
                             "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
-                            "기획서 복잡도를 분석해 테스트 유형별 적정 TC 수를 판단합니다. "
-                            "과도하게 적거나 많지 않게, 실무 기준으로 판단하세요. "
+                            "기획서 복잡도를 분석해 테스트 유형별 TC 수를 결정합니다. "
+                            "빠진 케이스가 없도록 최대한 촘촘하게, 각 유형별로 충분히 많이 배정하세요. "
                             "JSON만 출력하세요."
                         ),
                     },
@@ -337,9 +344,11 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
             else:
                 raise
 
+    fallback = [("기능", 6), ("예외처리", 6), ("경계값", 5), ("회귀", 5), ("보안", 3), ("UI/UX", 3)]
+
     if response is None:
         print("  [오류] 플랜 분석 Rate Limit 재시도 소진 — 기본값 사용")
-        return [(t, n) for t, n in minimums.items()]
+        return fallback
 
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -348,22 +357,15 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
     try:
         plan_dict = json.loads(raw)
         print(f"  [AI 플랜] {json.dumps(plan_dict, ensure_ascii=False)}")
-        # 최솟값 보장 + 0인 유형 제외
         plan = []
-        for t, min_n in minimums.items():
-            ai_n = int(plan_dict.get(t, min_n))
-            n = max(ai_n, min_n)
-            if ai_n < min_n:
-                print(f"  [플랜 보정] {t}: AI={ai_n} → 최솟값={min_n} 적용")
-            plan.append((t, n))
-        # 최솟값에 없는 유형(보안, UI/UX 등) 추가
         for t, n in plan_dict.items():
-            if t not in minimums and int(n) > 0:
-                plan.append((t, int(n)))
-        return plan
+            n = max(int(n), 1)  # 0개 방어만 유지
+            if n > 0:
+                plan.append((t, n))
+        return plan if plan else fallback
     except (json.JSONDecodeError, ValueError):
         print(f"  [경고] 플랜 분석 실패 (응답: {raw[:100]}) — 기본값 사용")
-        return [(t, n) for t, n in minimums.items()]
+        return fallback
 
 
 # 2단계: 유형별 분리 호출 → 합산
@@ -386,6 +388,7 @@ def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, con
             print(f"    [일일 한도 초과] {e}")
             print(f"    지금까지 생성된 {len(all_tcs)}개 TC로 저장합니다.")
             break
+        batch = [sanitize_tc(tc, test_type, idx + i) for i, tc in enumerate(batch)]
         print(f"    [{test_type}] {len(batch)}개 완료")
         all_tcs.extend(batch)
         idx += len(batch)
@@ -446,12 +449,12 @@ def save_excel(results: list, output_path: str):
     wb.remove(wb.active)  # 기본 빈 시트 제거
 
     headers = [
-        "TC ID", "대분류", "소분류", "테스트 유형", "우선순위",
+        "TC ID", "대분류", "소분류", "테스트 유형",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "실제 결과", "테스트 상태", "비고 / 버그 링크",
+        "테스트 상태", "비고 / 버그 링크", "우선순위",
     ]
-    col_widths = [14, 14, 16, 12, 10, 35, 28, 45, 35, 30, 12, 20]
-    last_col_letter = "L"
+    col_widths = [14, 14, 16, 12, 35, 28, 45, 35, 12, 20, 10]
+    last_col_letter = "K"
 
     header_font  = Font(bold=True, color="FFFFFF")
     header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -494,23 +497,22 @@ def save_excel(results: list, output_path: str):
             ws.cell(row=r_idx, column=2,  value=tc.get("대분류", "")).alignment = data_align
             ws.cell(row=r_idx, column=3,  value=tc.get("소분류", "")).alignment = data_align
             ws.cell(row=r_idx, column=4,  value=tc.get("테스트유형", "")).alignment = data_align
+            ws.cell(row=r_idx, column=5,  value=tc.get("테스트시나리오", "")).alignment = data_align
+            ws.cell(row=r_idx, column=6,  value=tc.get("사전조건", "")).alignment = data_align
+            ws.cell(row=r_idx, column=7,  value=tc.get("테스트단계", "")).alignment = data_align
+            ws.cell(row=r_idx, column=8,  value=tc.get("기대결과", "")).alignment = data_align
+            ws.cell(row=r_idx, column=9,  value="").alignment = data_align   # 테스트 상태
+            ws.cell(row=r_idx, column=10, value="").alignment = data_align   # 연결 버그/비고
             priority = tc.get("우선순위", "")
-            p_cell = ws.cell(row=r_idx, column=5, value=priority)
+            p_cell = ws.cell(row=r_idx, column=11, value=priority)
             p_cell.alignment = data_align
             if priority in priority_fills:
                 p_cell.fill = priority_fills[priority]
-            ws.cell(row=r_idx, column=6,  value=tc.get("테스트시나리오", "")).alignment = data_align
-            ws.cell(row=r_idx, column=7,  value=tc.get("사전조건", "")).alignment = data_align
-            ws.cell(row=r_idx, column=8,  value=tc.get("테스트단계", "")).alignment = data_align
-            ws.cell(row=r_idx, column=9,  value=tc.get("기대결과", "")).alignment = data_align
-            ws.cell(row=r_idx, column=10, value="").alignment = data_align   # 실제 결과
-            ws.cell(row=r_idx, column=11, value="").alignment = data_align   # 테스트 상태
-            ws.cell(row=r_idx, column=12, value="").alignment = data_align   # 연결 버그/비고
             ws.row_dimensions[r_idx].height = 70
 
-        # 테스트 상태 드롭다운 (K열): P / F / B / N/A
+        # 테스트 상태 드롭다운 (I열): P / F / B / N/A
         dv = DataValidation(type="list", formula1='"P,F,B,N/A"', allow_blank=True, showDropDown=False)
-        dv.sqref = f"K3:K{last_row}"
+        dv.sqref = f"I3:I{last_row}"
         ws.add_data_validation(dv)
 
     wb.save(output_path)
@@ -565,16 +567,16 @@ def save_to_sheets(results: list, sheet_id: str):
     sh = gc.open_by_key(sheet_id)
 
     headers = [
-        "TC ID", "대분류", "소분류", "테스트 유형", "우선순위",
+        "TC ID", "대분류", "소분류", "테스트 유형",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "실제 결과", "테스트 상태", "비고 / 버그 링크",
+        "테스트 상태", "비고 / 버그 링크", "우선순위",
     ]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
         "Low":    {"red": 0.85, "green": 0.92, "blue": 0.85},
     }
-    col_widths = [100, 110, 120, 110, 90, 280, 200, 320, 260, 220, 100, 160]
+    col_widths = [100, 110, 120, 110, 280, 200, 320, 260, 100, 160, 90]
     total_tc = 0
 
     for item in results:
@@ -596,11 +598,11 @@ def save_to_sheets(results: list, sheet_id: str):
             "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
             "horizontalAlignment": "LEFT",
         })
-        ws.merge_cells("A1:L1")
+        ws.merge_cells("A1:K1")
 
         # 행 2: 컬럼 헤더
         ws.update([headers], "A2")
-        ws.format("A2:L2", {
+        ws.format("A2:K2", {
             "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
             "horizontalAlignment": "CENTER",
@@ -614,33 +616,32 @@ def save_to_sheets(results: list, sheet_id: str):
                 tc.get("대분류", ""),
                 tc.get("소분류", ""),
                 tc.get("테스트유형", ""),
-                tc.get("우선순위", ""),
                 tc.get("테스트시나리오", ""),
                 tc.get("사전조건", ""),
                 tc.get("테스트단계", ""),
                 tc.get("기대결과", ""),
-                "",  # 실제 결과
                 "",  # 테스트 상태
                 "",  # 연결 버그/비고
+                tc.get("우선순위", ""),
             ])
         if rows_data:
             ws.update(rows_data, "A3")
             end_row = 3 + len(rows_data)
 
             # 데이터 셀 정렬: 세로=가운데, 가로=왼쪽
-            ws.format(f"A3:L{end_row - 1}", {
+            ws.format(f"A3:K{end_row - 1}", {
                 "verticalAlignment": "MIDDLE",
                 "horizontalAlignment": "LEFT",
                 "wrapStrategy": "WRAP",
             })
 
-            # 우선순위 색상 (E열만)
+            # 우선순위 색상 (K열만)
             for i, tc in enumerate(item["test_cases"]):
                 color = priority_colors.get(tc.get("우선순위", ""))
                 if color:
-                    ws.format(f"E{3 + i}", {"backgroundColor": color})
+                    ws.format(f"K{3 + i}", {"backgroundColor": color})
 
-            # 기존 드롭다운 초기화 후 테스트 상태(K열) 드롭다운 재설정
+            # 기존 드롭다운 초기화 후 테스트 상태(I열) 드롭다운 재설정
             sh.batch_update({"requests": [
                 {
                     "setDataValidation": {
@@ -649,7 +650,7 @@ def save_to_sheets(results: list, sheet_id: str):
                             "startRowIndex": 2,
                             "endRowIndex": end_row,
                             "startColumnIndex": 0,
-                            "endColumnIndex": 12,
+                            "endColumnIndex": 11,
                         },
                     }
                 },
@@ -659,8 +660,8 @@ def save_to_sheets(results: list, sheet_id: str):
                             "sheetId": ws.id,
                             "startRowIndex": 2,
                             "endRowIndex": end_row,
-                            "startColumnIndex": 10,
-                            "endColumnIndex": 11,
+                            "startColumnIndex": 8,
+                            "endColumnIndex": 9,
                         },
                         "rule": {
                             "condition": {
@@ -698,6 +699,42 @@ def save_to_sheets(results: list, sheet_id: str):
 
 # ── 처리 공통 로직 ────────────────────────────────────────────────────
 
+# AI 응답에 가끔 섞이는 한자 오타 교정 (한국어 텍스트에 정상적으로 등장할 수 없는 패턴)
+_TEXT_FIXES = [
+    (re.compile(r"예外처리"), "예외처리"),
+    (re.compile(r"\s*不存在"), " 존재하지 않음"),
+    (re.compile(r"나타남"), "노출됨"),
+]
+_FOREIGN_SCRIPT_PATTERN = re.compile(r"[一-鿿㐀-䶿぀-ヿ]+")
+_TC_ID_PATTERN = re.compile(r"^TC_(?:[A-Z]+_)?(\d+)$")
+
+
+def _sanitize_text(value):
+    """문자열에 섞인 한자/일본어 가나 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거합니다."""
+    if not isinstance(value, str):
+        return value
+    for pattern, replacement in _TEXT_FIXES:
+        value = pattern.sub(replacement, value)
+    if _FOREIGN_SCRIPT_PATTERN.search(value):
+        value = _FOREIGN_SCRIPT_PATTERN.sub("", value)
+        value = re.sub(r"[ \t]{2,}", " ", value).strip()
+    return value
+
+
+def sanitize_tc(tc: dict, test_type: str, seq: int = None) -> dict:
+    """TC 텍스트를 정제하고, 테스트유형과 tc_id 형식("TC_xxx")을 강제로 고정합니다."""
+    for field, value in tc.items():
+        tc[field] = _sanitize_text(value)
+    tc["테스트유형"] = test_type
+    if seq is not None:
+        tc["tc_id"] = f"TC_{seq:03d}"
+    else:
+        m = _TC_ID_PATTERN.match(tc.get("tc_id", ""))
+        if m:
+            tc["tc_id"] = f"TC_{int(m.group(1)):03d}"
+    return tc
+
+
 def filter_tc_list(tc_list: list) -> list:
     """필수 필드(테스트시나리오, 기대결과)가 없는 TC를 제거합니다."""
     valid = []
@@ -707,6 +744,20 @@ def filter_tc_list(tc_list: list) -> list:
             continue
         valid.append(tc)
     return valid
+
+
+def dedupe_tc_list(tc_list: list, threshold: float = 0.82) -> list:
+    """테스트시나리오가 서로 유사한 중복 TC를 제거합니다 (먼저 나온 것을 우선 유지)."""
+    kept = []
+    kept_scenarios = []
+    for tc in tc_list:
+        scenario = (tc.get("테스트시나리오") or "").strip()
+        if any(SequenceMatcher(None, scenario, s).ratio() >= threshold for s in kept_scenarios):
+            print(f"    [중복 제외] {tc.get('tc_id')} - {scenario}")
+            continue
+        kept.append(tc)
+        kept_scenarios.append(scenario)
+    return kept
 
 
 def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str = "") -> list:
@@ -734,6 +785,7 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
         print(f"  TC 생성 중...")
         tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
         tc_list = filter_tc_list(tc_list)
+        tc_list = dedupe_tc_list(tc_list)
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:
             print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")

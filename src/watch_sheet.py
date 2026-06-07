@@ -19,11 +19,15 @@
 """
 
 import sys
+import io
 import os
 import re
 import json
 import argparse
 from datetime import datetime
+from difflib import SequenceMatcher
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import requests
 from jira import JIRA
@@ -356,6 +360,20 @@ def filter_tc_list(tc_list: list) -> list:
     return [tc for tc in tc_list if tc.get("테스트시나리오") and tc.get("기대결과")]
 
 
+def dedupe_tc_list(tc_list: list, threshold: float = 0.82) -> list:
+    """테스트시나리오가 서로 유사한 중복 TC를 제거합니다 (먼저 나온 것을 우선 유지)."""
+    kept = []
+    kept_scenarios = []
+    for tc in tc_list:
+        scenario = (tc.get("테스트시나리오") or "").strip()
+        if any(SequenceMatcher(None, scenario, s).ratio() >= threshold for s in kept_scenarios):
+            print(f"    [중복 제외] {tc.get('tc_id')} - {scenario}")
+            continue
+        kept.append(tc)
+        kept_scenarios.append(scenario)
+    return kept
+
+
 def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> str:
     """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다."""
     context_section = f"\n\n[서비스 컨텍스트]\n{context}" if context else ""
@@ -399,7 +417,14 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
     type_guide = {
         "기능":     "정상적인 사용 흐름(Happy Path) — 기능이 올바르게 작동하는 시나리오",
         "예외처리": "오류 입력, 권한 없음, 서버 오류, 네트워크 오류 등 비정상 흐름",
-        "경계값":   "최솟값/최댓값, 빈값, 공백, 특수문자, 글자 수 한계 등 경계 조건",
+        "경계값":   (
+            "입력 필드의 데이터 타입에 맞는 경계 조건만 작성 — "
+            "텍스트/코드형(쿠폰코드, 닉네임 등): 글자 수 상한/하한, 공백, 특수문자, 대소문자, 다국어; "
+            "숫자형(수량, 금액 등): 최솟값/최댓값/0/음수/소수점; "
+            "날짜·시간형: 과거/미래/형식 오류/만료 시점; "
+            "선택형(체크박스, 드롭다운 등): 미선택/중복 선택/전체 선택. "
+            "필드의 실제 데이터 타입과 맞지 않는 케이스(예: 코드 문자열에 최솟값/최댓값)는 작성하지 말 것"
+        ),
         "회귀":     "이 기능 변경으로 영향받을 수 있는 연관 기능의 정상 동작 검증",
         "보안":     "인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등 보안 취약점",
         "UI/UX":    "버튼 활성화 상태, 에러 메시지 문구, 화면 전환, 로딩 표시 등 UI 동작",
@@ -640,15 +665,16 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
         ws = sh.add_worksheet(title=sheet_title, rows=200, cols=len(headers))
         print(f"  '{sheet_title}' 시트 생성")
 
-    # 행 1: 티켓 URL 정보
+    # 행 1: 티켓 URL 정보 + 검수 안내 배너
     ticket_url = f"{JIRA_URL}/browse/{issue['key']}"
     ws.update(
-        [[f"{issue['key']}  |  {issue['summary']}  |  {ticket_url}  |  생성: {generated_at}"]],
+        [[f"{issue['key']}  |  {issue['summary']}  |  {ticket_url}  |  생성: {generated_at}"
+          f"  |  ⚠️ AI 자동 생성 TC — 실행 전 QA 검수·보완 필요"]],
         "A1"
     )
     ws.format("A1", {
-        "backgroundColor": {"red": 0.922, "green": 0.953, "blue": 0.984},
-        "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
+        "backgroundColor": {"red": 1.0, "green": 0.949, "blue": 0.8},
+        "textFormat": {"bold": True, "foregroundColor": {"red": 0.6, "green": 0.35, "blue": 0.0}},
         "horizontalAlignment": "LEFT",
     })
     ws.merge_cells("A1:L1")
@@ -746,9 +772,9 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     print(f"  '{sheet_title}' 시트에 TC {len(tc_list)}개 저장 완료")
 
 
-def mark_row_done(ws_input, row_idx: int, timestamp: str):
-    """입력 시트 해당 행의 B열=완료, C열=처리시각으로 업데이트."""
-    ws_input.update_cell(row_idx, 2, "완료")
+def mark_row_review_pending(ws_input, row_idx: int, timestamp: str):
+    """입력 시트 해당 행의 B열=검수 대기(AI 생성 완료, 사람 확인 필요), C열=처리시각으로 업데이트."""
+    ws_input.update_cell(row_idx, 2, "검수 대기 (AI 생성 완료)")
     ws_input.update_cell(row_idx, 3, timestamp)
 
 
@@ -760,11 +786,12 @@ def notify_slack(processed: list, sheet_id: str):
         return
 
     sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-    lines = [f"*[TC 자동 생성 완료]* {len(processed)}개 티켓 처리됨"]
+    lines = [f"*[TC 자동 생성 완료 — 검수 요청]* {len(processed)}개 티켓 처리됨"]
     for item in processed:
         tc_count = item["tc_count"]
-        lines.append(f"  • `{item['key']}` {item['summary']} — TC {tc_count}개")
-    lines.append(f"\n<{sheet_url}|구글 시트에서 확인>")
+        lines.append(f"  • `{item['key']}` {item['summary']} — TC {tc_count}개 (검수 대기)")
+    lines.append("\n⚠️ AI가 생성한 초안입니다. QA 담당자 검수·보완 후 사용해주세요.")
+    lines.append(f"<{sheet_url}|구글 시트에서 확인>")
 
     payload = {"text": "\n".join(lines)}
     try:
@@ -877,6 +904,7 @@ def main():
         print(f"  TC 생성 중...")
         tc_list = generate_test_cases(groq_client, issue, augmented_spec, spec_context)
         tc_list = filter_tc_list(tc_list)
+        tc_list = dedupe_tc_list(tc_list)
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:
             print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
@@ -884,9 +912,9 @@ def main():
         # 티켓별 시트에 저장
         create_ticket_sheet(sh, issue, tc_list, timestamp)
 
-        # 입력 시트 상태 업데이트
-        mark_row_done(ws_input, row_idx, timestamp)
-        print(f"  상태 업데이트: 완료")
+        # 입력 시트 상태 업데이트 (AI 생성 완료 — 사람 검수 전까지는 확정 아님)
+        mark_row_review_pending(ws_input, row_idx, timestamp)
+        print(f"  상태 업데이트: 검수 대기")
 
         processed.append({"key": issue["key"], "summary": issue["summary"], "tc_count": len(tc_list)})
 
