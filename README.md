@@ -1,8 +1,18 @@
-# AutoTC — AI 기반 테스트 케이스 자동 생성 도구
+# AutoTC — AI 기반 QA 업무 자동화 툴킷
 
-> Jira 티켓을 입력하면  
-> AI(Groq LLaMA 3.3 70B)가 테스트 케이스를 자동으로 생성하고  
-> 구글 시트에 저장하는 QA 자동화 파이프라인
+> Jira 티켓 → TC 자동 생성, Playwright 테스트 결과 → 릴리즈 판단까지  
+> AI(Groq LLaMA 3.3 70B)가 QA의 "판단 업무"를 자동화하는 툴킷  
+> TC 작성은 AI가, QA는 검토와 의사결정에 집중
+
+## 구성 요소
+
+| 영역 | 기능 | 핵심 파일 |
+|------|------|----------|
+| **TC 생성** | Jira 티켓 → 스펙 추론 → 유형별 TC 자동 생성 | `generate_tc.py`, `watch_sheet.py` |
+| **릴리즈 판단** | Playwright 테스트 결과 → 실패 패턴 분석 → Go/Caution/No-Go 권고 | `release_report.py` |
+| **협업 자동화** | Slack 슬래시 커맨드로 기획서·회의록·Jira 티켓 생성 | `slack_app.py`, `app.py`, `create_ticket.py`, `generate_minutes.py`, `generate_test_plan.py` |
+
+아래 내용은 핵심 모듈인 **TC 생성 파이프라인** 기준 설명입니다. 릴리즈 판단 파이프라인은 [QA Ops 파이프라인](#release_reportpy--릴리즈-판단-파이프라인) 섹션 참고.
 
 ---
 
@@ -142,17 +152,23 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 ```
 AutoTC/
 ├── src/
-│   ├── generate_tc.py       # 단일/일괄 TC 생성 (CLI) — 동적 플랜 포함
-│   ├── watch_sheet.py       # 구글 시트 폴링 + TC 자동 생성 (메인)
-│   ├── generate_spec.py     # 티켓 기반 기획서 자동 생성
-│   ├── generate_context.py  # 서비스 컨텍스트 초안 AI 생성
-│   └── utils.py             # 공통 유틸
+│   ├── generate_tc.py        # 단일/일괄 TC 생성 (CLI) — 동적 플랜 포함
+│   ├── watch_sheet.py        # 구글 시트 폴링 + TC 자동 생성 (메인)
+│   ├── release_report.py     # Playwright 결과 → AI 릴리즈 판단 → Slack 전송
+│   ├── generate_spec.py      # 티켓 기반 기획서 자동 생성
+│   ├── generate_context.py   # 서비스 컨텍스트 초안 AI 생성
+│   ├── generate_test_plan.py # 티켓 묶음 → Confluence 테스트 계획서 생성
+│   ├── generate_minutes.py   # 회의록 자동 생성
+│   ├── create_ticket.py      # 자연어 → Jira 티켓 자동 생성
+│   ├── slack_app.py          # Slack 슬래시 커맨드 (/tc, /review, /spec-review)
+│   └── utils.py              # 공통 유틸
+├── app.py                    # Slack 커맨드 서버 (Flask, Railway 배포)
 ├── contexts/
-│   ├── kream.md             # 크림 서비스 컨텍스트
-│   └── kurly.md             # 마켓컬리 서비스 컨텍스트
-├── reports/                 # TC JSON, 엑셀 출력
+│   ├── kream.md               # 크림 서비스 컨텍스트
+│   └── kurly.md                # 마켓컬리 서비스 컨텍스트
+├── reports/                   # TC JSON, 엑셀 출력
 ├── .github/workflows/
-│   └── watch.yml            # GitHub Actions 스케줄 실행
+│   └── watch.yml              # GitHub Actions 스케줄 실행 (TC 생성)
 ├── .env.example
 └── requirements.txt
 ```
@@ -216,6 +232,28 @@ python src/watch_sheet.py
 | 예외/경계값 케이스 | 누락 빈번 | AI가 유형별 자동 포함 |
 | TC 수량 결정 | 작성자 감 | 스펙 복잡도 기반 동적 결정 |
 | 우선순위 | 수동 지정 | High/Medium/Low 자동 분류 |
+
+---
+
+## release_report.py — 릴리즈 판단 파이프라인
+
+TC 생성과는 독립된 모듈로, Playwright 자동화 테스트 결과를 받아 **릴리즈 가능 여부를 AI가 1차 판단**합니다.
+
+```
+Playwright 실행 (--reporter=json)
+    ↓
+results.json 파싱 — 통과/실패/건너뜀, 실패 테스트명 + 에러 메시지
+    ↓
+Groq AI 분석 — 실패 원인 패턴 → 릴리즈 권고(Go/Caution/No-Go) + 한 줄 요약
+    ↓
+Slack Block Kit 리포트 전송 (실패 상세 + Playwright Report 링크)
+```
+
+```bash
+python src/release_report.py playwright-report/results.json
+```
+
+[PlaywrightQA](https://github.com/yoplekiller/PlaywrightQA) 레포의 GitHub Actions에서 테스트 종료 후 자동 호출되도록 연동되어 있습니다 (`actions/checkout`으로 본 레포를 함께 체크아웃).
 
 ---
 
