@@ -186,8 +186,8 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 [작성 지침]
 - tc_id: 반드시 "TC_{{3자리}}" 형식 고정 (모듈 구분 없이), {start_idx:03d}번부터 시작
 - 테스트유형: 반드시 "{test_type}" 으로 고정
-- 사전조건/테스트단계: 번호 매겨서 구체적으로 작성
-- 기대결과: "~됨" 또는 "~함" 으로 끝낼 것 (예: "노출됨", "표시됨" — "나타남" 같은 표현은 사용 금지)
+- 사전조건/테스트단계/기대결과: 번호 매겨서 구체적으로 작성 ("1. ..." 형식, 항목이 여러 개면 "2.", "3."으로 이어서)
+- 기대결과 각 항목: "~됨" 또는 "~함" 으로 끝낼 것 (예: "노출됨", "표시됨" — "나타남" 같은 표현은 사용 금지)
 - {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
 
 JSON 배열만 출력하세요. 마크다운 없이.
@@ -202,7 +202,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
     "테스트시나리오": "...",
     "사전조건": "1. ...\\n2. ...",
     "테스트단계": "1. ...\\n2. ...\\n3. ...",
-    "기대결과": "...됨"
+    "기대결과": "1. ...됨"
   }}
 ]"""
 
@@ -708,9 +708,25 @@ _TEXT_FIXES = [
 _FOREIGN_SCRIPT_PATTERN = re.compile(r"[一-鿿㐀-䶿぀-ヿ]+")
 _TC_ID_PATTERN = re.compile(r"^TC_(?:[A-Z]+_)?(\d+)$")
 
+# 한글에 공백 없이 붙은 영단어(예: "사진을registered") — AI가 문장을 끝맺지 못하고 영어로 누락한 패턴
+_DANGLING_LATIN_PATTERN = re.compile(r"([가-힣])([a-zA-Z]{2,})\b")
+_TRAILING_PARTICLE_PATTERN = re.compile(r"(을|를|이|가|은|는|에|와|과|의|로|으로|도)$")
+_KOREAN_ENDING_PATTERN = re.compile(r"(음|함|됨|임|완료)$")
+
+
+def _fix_dangling_latin(line):
+    """한글 뒤에 붙은 영단어를 제거하고, 조사로 끝나 미완성된 문장을 보정합니다."""
+    if not _DANGLING_LATIN_PATTERN.search(line):
+        return line
+    line = _DANGLING_LATIN_PATTERN.sub(r"\1", line).rstrip()
+    if not _KOREAN_ENDING_PATTERN.search(line):
+        line = _TRAILING_PARTICLE_PATTERN.sub("", line).rstrip()
+        line += "이 정상적으로 처리됨"
+    return line
+
 
 def _sanitize_text(value):
-    """문자열에 섞인 한자/일본어 가나 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거합니다."""
+    """문자열에 섞인 한자/일본어 가나/영단어 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거합니다."""
     if not isinstance(value, str):
         return value
     for pattern, replacement in _TEXT_FIXES:
@@ -718,6 +734,8 @@ def _sanitize_text(value):
     if _FOREIGN_SCRIPT_PATTERN.search(value):
         value = _FOREIGN_SCRIPT_PATTERN.sub("", value)
         value = re.sub(r"[ \t]{2,}", " ", value).strip()
+    if _DANGLING_LATIN_PATTERN.search(value):
+        value = "\n".join(_fix_dangling_latin(line) for line in value.split("\n"))
     return value
 
 
@@ -732,6 +750,9 @@ def sanitize_tc(tc: dict, test_type: str, seq: int = None) -> dict:
         m = _TC_ID_PATTERN.match(tc.get("tc_id", ""))
         if m:
             tc["tc_id"] = f"TC_{int(m.group(1)):03d}"
+    expected = tc.get("기대결과")
+    if isinstance(expected, str) and expected and not re.match(r"^\s*1\.", expected):
+        tc["기대결과"] = f"1. {expected}"
     return tc
 
 

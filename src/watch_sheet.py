@@ -355,6 +355,56 @@ def get_or_generate_spec(groq_client: Groq, issue: dict, service_context: str = 
     return generated if generated else service_context
 
 
+# AI 응답에 가끔 섞이는 한자/일본어 가나 오타 교정 (한국어 텍스트에 정상적으로 등장할 수 없는 패턴)
+_TEXT_FIXES = [
+    (re.compile(r"예外처리"), "예외처리"),
+    (re.compile(r"\s*不存在"), " 존재하지 않음"),
+    (re.compile(r"나타남"), "노출됨"),
+]
+_FOREIGN_SCRIPT_PATTERN = re.compile(r"[一-鿿㐀-䶿぀-ヿ]+")
+
+# 한글에 공백 없이 붙은 영단어(예: "사진을registered") — AI가 문장을 끝맺지 못하고 영어로 누락한 패턴
+_DANGLING_LATIN_PATTERN = re.compile(r"([가-힣])([a-zA-Z]{2,})\b")
+_TRAILING_PARTICLE_PATTERN = re.compile(r"(을|를|이|가|은|는|에|와|과|의|로|으로|도)$")
+_KOREAN_ENDING_PATTERN = re.compile(r"(음|함|됨|임|완료)$")
+
+
+def _fix_dangling_latin(line):
+    """한글 뒤에 붙은 영단어를 제거하고, 조사로 끝나 미완성된 문장을 보정합니다."""
+    if not _DANGLING_LATIN_PATTERN.search(line):
+        return line
+    line = _DANGLING_LATIN_PATTERN.sub(r"\1", line).rstrip()
+    if not _KOREAN_ENDING_PATTERN.search(line):
+        line = _TRAILING_PARTICLE_PATTERN.sub("", line).rstrip()
+        line += "이 정상적으로 처리됨"
+    return line
+
+
+def _sanitize_text(value):
+    """문자열에 섞인 한자/일본어 가나/영단어 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거합니다."""
+    if not isinstance(value, str):
+        return value
+    for pattern, replacement in _TEXT_FIXES:
+        value = pattern.sub(replacement, value)
+    if _FOREIGN_SCRIPT_PATTERN.search(value):
+        value = _FOREIGN_SCRIPT_PATTERN.sub("", value)
+        value = re.sub(r"[ \t]{2,}", " ", value).strip()
+    if _DANGLING_LATIN_PATTERN.search(value):
+        value = "\n".join(_fix_dangling_latin(line) for line in value.split("\n"))
+    return value
+
+
+def normalize_tc_id(tc: dict, seq: int) -> dict:
+    """TC 텍스트를 정제하고, tc_id 형식을 "TC_{3자리}"로 강제 고정하며, 기대결과 앞에 "1. "을 강제합니다."""
+    for field, value in tc.items():
+        tc[field] = _sanitize_text(value)
+    tc["tc_id"] = f"TC_{seq:03d}"
+    expected = tc.get("기대결과")
+    if isinstance(expected, str) and expected and not re.match(r"^\s*1\.", expected):
+        tc["기대결과"] = f"1. {expected}"
+    return tc
+
+
 def filter_tc_list(tc_list: list) -> list:
     """필수 필드(테스트시나리오, 기대결과)가 없는 TC를 제거합니다."""
     return [tc for tc in tc_list if tc.get("테스트시나리오") and tc.get("기대결과")]
@@ -444,18 +494,17 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 {augmented_spec}{context_block}
 
 [작성 지침]
-- tc_id: TC_{{모듈}}_{{3자리}} 형식, {start_idx:03d}번부터 시작
-  모듈 코드: AUTH(회원인증), CART(장바구니), PAY(주문/결제), MY(마이페이지), SEARCH(검색), PROD(상품), HOME(홈), FUNC(기타)
+- tc_id: 반드시 "TC_{{3자리}}" 형식 고정 (모듈 구분 없이), {start_idx:03d}번부터 시작
 - 테스트유형: 반드시 "{test_type}" 으로 고정
-- 사전조건/테스트단계: 번호 매겨서 구체적으로 작성
-- 기대결과: "~됨" 또는 "~함" 으로 끝낼 것
+- 사전조건/테스트단계/기대결과: 번호 매겨서 구체적으로 작성 ("1. ..." 형식, 항목이 여러 개면 "2.", "3."으로 이어서)
+- 기대결과 각 항목: "~됨" 또는 "~함" 으로 끝낼 것
 - {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
 
 JSON 배열만 출력하세요. 마크다운 없이.
 
 [
   {{
-    "tc_id": "TC_AUTH_{start_idx:03d}",
+    "tc_id": "TC_{start_idx:03d}",
     "대분류": "...",
     "소분류": "...",
     "테스트유형": "{test_type}",
@@ -463,7 +512,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
     "테스트시나리오": "...",
     "사전조건": "1. ...\\n2. ...",
     "테스트단계": "1. ...\\n2. ...\\n3. ...",
-    "기대결과": "...됨"
+    "기대결과": "1. ...됨"
   }}
 ]"""
 
@@ -905,6 +954,7 @@ def main():
         tc_list = generate_test_cases(groq_client, issue, augmented_spec, spec_context)
         tc_list = filter_tc_list(tc_list)
         tc_list = dedupe_tc_list(tc_list)
+        tc_list = [normalize_tc_id(tc, i) for i, tc in enumerate(tc_list, start=1)]
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:
             print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
