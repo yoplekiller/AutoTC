@@ -1,5 +1,4 @@
 flask
-gunicorn
 groq
 jira
 requests

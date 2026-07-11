@@ -162,7 +162,7 @@ AutoTC/
 │   ├── create_ticket.py      # 자연어 → Jira 티켓 자동 생성
 │   ├── slack_app.py          # Slack 슬래시 커맨드 (/tc, /review, /spec-review)
 │   └── utils.py              # 공통 유틸
-├── app.py                    # Slack 커맨드 서버 (Flask, Railway 배포)
+├── app.py                    # Slack 커맨드 서버 (Flask, 로컬 + ngrok)
 ├── contexts/
 │   ├── kream.md               # 크림 서비스 컨텍스트
 │   └── kurly.md                # 마켓컬리 서비스 컨텍스트

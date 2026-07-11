@@ -89,7 +89,7 @@ python app.py
 ## 주의사항
 
 - `python app.py` 실행 중에만 Slack 커맨드 작동
-- ngrok 무료 플랜은 URL이 매번 바뀜 → 고정 URL 원하면 Railway 배포 필요
+- ngrok 무료 플랜은 URL이 매번 바뀜 → 서버 재시작 시 Slack App의 Request URL도 다시 업데이트해야 함
 - `.env` 파일에 API 키 모두 설정되어 있어야 함
 
 ---
