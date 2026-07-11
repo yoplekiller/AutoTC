@@ -158,6 +158,7 @@ AutoTC/
 │   ├── generate_spec.py      # 티켓 기반 기획서 자동 생성
 │   ├── generate_context.py   # 서비스 컨텍스트 초안 AI 생성
 │   ├── generate_test_plan.py # 티켓 묶음 → Confluence 테스트 계획서 생성
+│   ├── generate_result_report.py # 티켓 + Playwright 결과 → Confluence 결과보고서 생성
 │   ├── generate_minutes.py   # 회의록 자동 생성
 │   ├── create_ticket.py      # 자연어 → Jira 티켓 자동 생성
 │   ├── slack_app.py          # Slack 슬래시 커맨드 (/tc, /review, /spec-review)
@@ -254,6 +255,29 @@ python src/release_report.py playwright-report/results.json
 ```
 
 [PlaywrightQA](https://github.com/yoplekiller/PlaywrightQA) 레포의 GitHub Actions에서 테스트 종료 후 자동 호출되도록 연동되어 있습니다 (`actions/checkout`으로 본 레포를 함께 체크아웃).
+
+---
+
+## generate_result_report.py — QA 결과보고서 자동 생성
+
+Jira 티켓(검증범위/대상)과 Playwright 테스트 결과(진행결과/결함현황)를 조합해 QA 결과보고서를 Confluence 페이지로 생성합니다.
+
+**1뎁스 구성**: 테스트요약(과제명~결함현황 14개 필드 요약 표) / 테스트 수행일정 / 검증범위 및 특이사항 / 검증대상 / 테스트케이스 진행결과 / 결함현황
+
+```bash
+python src/generate_result_report.py MKQA-1 MKQA-2 \
+  --title "결제 모듈 개선" --round 1차 --author 임재민 --qa 임재민 \
+  --deploy-date 2026-07-20 --start-date 2026-07-14 --end-date 2026-07-18 \
+  --env "Chromium / Windows 11" \
+  --spec-doc https://example.com/spec --figma https://figma.com/xxx \
+  --checklist https://example.com/checklist \
+  --playwright-report playwright-report/results.json
+
+# 미리보기만 (Confluence 업로드 안 함)
+python src/generate_result_report.py MKQA-1 --title "결제 모듈 개선" --author 임재민 --dry-run
+```
+
+`--playwright-report`를 생략하면 테스트케이스 진행결과/결함현황 섹션은 "데이터 없음"으로 표시됩니다.
 
 ---
 
