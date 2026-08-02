@@ -580,11 +580,23 @@ def extract_sheet_id(url: str) -> str:
     raise ValueError(f"유효한 구글 스프레드시트 URL이 아닙니다: {url}")
 
 
-def read_keys_from_sheets(sheet_id: str) -> list:
-    """구글 스프레드시트 첫 번째 시트 A열에서 티켓 URL/키를 읽습니다. (헤더 제외)"""
+def extract_gid(url: str) -> str | None:
+    """구글 스프레드시트 URL에서 특정 탭의 gid를 추출합니다. 없으면 None."""
+    match = re.search(r"[#&]gid=(\d+)", url)
+    return match.group(1) if match else None
+
+
+def read_keys_from_sheets(sheet_id: str, gid: str | None = None) -> list:
+    """구글 스프레드시트 A열에서 티켓 URL/키를 읽습니다. (헤더 제외)
+
+    URL에 gid가 명시되어 있으면 그 탭을, 없으면 첫 번째 탭을 읽습니다.
+    """
     gc = _get_gspread_client()
     sh = gc.open_by_key(sheet_id)
-    ws = sh.get_worksheet(0)
+    if gid is not None:
+        ws = sh.get_worksheet_by_id(int(gid))
+    else:
+        ws = sh.get_worksheet(0)
     all_values = ws.col_values(1)  # A열 전체
     # 헤더(1행) 제외, 빈 값 스킵
     return [v.strip() for v in all_values[1:] if v and v.strip()]
@@ -901,7 +913,12 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
             break
         print(f"  --- 요구사항 분석 ---\n{augmented_spec}\n  ---")
         print(f"  TC 생성 중...")
-        tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
+        try:
+            tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
+        except DailyTokenLimitError as e:
+            print(f"  [일일 한도 초과] {e}")
+            print(f"  지금까지 처리된 {len(results)}개 티켓 결과로 저장합니다.")
+            break
         tc_list = filter_tc_list(tc_list)
         tc_list = dedupe_tc_list(tc_list)
         print(f"  생성된 TC: {len(tc_list)}개")
@@ -962,9 +979,12 @@ def main():
         except ValueError as e:
             print(f"[오류] {e}")
             sys.exit(1)
+        gid = extract_gid(input_str)
 
         print(f"\n=== 구글 스프레드시트에서 티켓 목록 읽는 중... ===")
-        raw_keys = read_keys_from_sheets(sheet_id)
+        if gid:
+            print(f"  대상 탭: gid={gid}")
+        raw_keys = read_keys_from_sheets(sheet_id, gid)
         if not raw_keys:
             print("[오류] 스프레드시트 A열(2행~)에 티켓 URL/키가 없습니다.")
             sys.exit(1)
