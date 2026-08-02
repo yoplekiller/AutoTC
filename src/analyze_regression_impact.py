@@ -13,12 +13,15 @@ git diff 기반 회귀 영향 분석 — 코드 변경사항이 어떤 기존 TC
 """
 
 import sys
+import io
 import os
 import re
 import json
 import argparse
 import subprocess
 from datetime import datetime
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 from groq import Groq
 from dotenv import load_dotenv
