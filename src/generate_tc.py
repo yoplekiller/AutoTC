@@ -128,6 +128,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
 2. 주요 기능 요구사항 (3~5개)
 3. 예외/비정상 케이스 (2~3개)
 4. 보안·권한 고려사항 (해당 시)
+5. 확인이 필요한 질문 (기획서/티켓에 명시되지 않았지만 QA 관점에서 기획자·개발자에게 반드시 확인해야 하는 것 — 예: 경계값 처리 기준, 동시 요청 시 우선순위, 상태 전이 실패 시 롤백 여부 등. 해당 없으면 "없음")
 
 설명 없이 위 형식만 출력하세요.""",
                     },
@@ -148,7 +149,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
     if response is None:
         raise RuntimeError("augment_ticket_spec Rate Limit 재시도 소진")
 
-    return response.choices[0].message.content.strip()
+    return _sanitize_text(response.choices[0].message.content.strip())
 
 # TC 생성 (단일 유형)
 def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: str,
@@ -169,6 +170,11 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
         "보안":     "인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등 보안 취약점",
         "UI/UX":    "버튼 활성화 상태, 에러 메시지 문구, 화면 전환, 로딩 표시 등 UI 동작",
         "네트워크": "느린 네트워크, 연결 끊김, 타임아웃 상황에서의 동작",
+        "상태전이": (
+            "상태 값이 바뀌는 시나리오 — 정상적인 상태 A→B 전이, 허용되지 않는 역방향/우회 전이 시도, "
+            "동일 상태에서 중복 액션(예: 이미 발급된 쿠폰 재발급), 상태별로 가능/불가능한 액션이 달라지는 지점, "
+            "동시 요청으로 인한 상태 충돌(race condition)"
+        ),
     }
     context_block = f"\n\n[기획서/서비스 컨텍스트]\n{context}" if context else ""
 
@@ -188,6 +194,9 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 - 테스트유형: 반드시 "{test_type}" 으로 고정
 - 사전조건/테스트단계/기대결과: 번호 매겨서 구체적으로 작성 ("1. ..." 형식, 항목이 여러 개면 "2.", "3."으로 이어서)
 - 기대결과 각 항목: "~됨" 또는 "~함" 으로 끝낼 것 (예: "노출됨", "표시됨" — "나타남" 같은 표현은 사용 금지)
+- 위험도: 이 케이스가 실패(버그로 이어짐)했을 때 비즈니스/사용자에게 미치는 영향 크기. High(결제·인증·데이터 유실 등 치명적) / Medium(핵심 기능 저하) / Low(경미한 불편)
+- 우선순위: 위험도와 발생 가능성(자주 타는 경로인지)을 함께 고려해 결정 — 위험도가 낮아도 자주 발생하는 경로면 우선순위는 높을 수 있음
+- 자동화가능여부: UI/API 자동화 도구(Selenium/Playwright/Appium 등)로 결정적으로 검증 가능하면 "가능", 육안 판단(디자인 정합성, 문구 뉘앙스 등)이나 외부 요인(실제 PG 결제 등)이 필요하면 "불가능"
 - {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
 
 JSON 배열만 출력하세요. 마크다운 없이.
@@ -199,6 +208,8 @@ JSON 배열만 출력하세요. 마크다운 없이.
     "소분류": "...",
     "테스트유형": "{test_type}",
     "우선순위": "High/Medium/Low",
+    "위험도": "High/Medium/Low",
+    "자동화가능여부": "가능/불가능",
     "테스트시나리오": "...",
     "사전조건": "1. ...\\n2. ...",
     "테스트단계": "1. ...\\n2. ...\\n3. ...",
@@ -286,6 +297,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
         "Epic":  "기능 8개 이상, 예외처리 7개 이상, 경계값 6개 이상, 회귀 7개 이상, 보안 5개 이상",
     }
     type_guide_str = type_guides.get(issue_type, "기능 5개 이상, 예외처리 4개 이상, 경계값 4개 이상, 회귀 4개 이상")
+    type_guide_str += " (상태 값/워크플로우가 존재하면 상태전이도 배정할 것, 없으면 0)"
     context_block = f"\n\n[기획서/스펙]\n{context}" if context else ""
 
     prompt = f"""다음 티켓과 기획서를 분석해서 테스트 유형별로 몇 개의 TC가 필요한지 결정하세요.
@@ -305,12 +317,13 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 - 연관 기능/화면 2개 이상 → 회귀 +3~5
 - 인증·권한·결제 포함 → 보안 5~8
 - 사용자 입력 UI 있음 → UI/UX 3~6
+- 상태 값(주문/쿠폰/결제 상태 등)이나 워크플로우가 존재 → 상태전이 3~5
 - 빠진 케이스가 없도록 충분히 많이 배정하세요
 
 아래 JSON 형식으로만 응답하세요. 마크다운 없이.
-{{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자}}
+{{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자, "상태전이": 숫자}}
 
-보안/UI/UX가 완전히 불필요하면 0으로 설정하세요."""
+보안/UI/UX/상태전이가 완전히 불필요하면 0으로 설정하세요."""
 
     import time
     response = None
@@ -357,11 +370,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
     try:
         plan_dict = json.loads(raw)
         print(f"  [AI 플랜] {json.dumps(plan_dict, ensure_ascii=False)}")
-        plan = []
-        for t, n in plan_dict.items():
-            n = max(int(n), 1)  # 0개 방어만 유지
-            if n > 0:
-                plan.append((t, n))
+        plan = [(t, int(n)) for t, n in plan_dict.items() if int(n) > 0]
         return plan if plan else fallback
     except (json.JSONDecodeError, ValueError):
         print(f"  [경고] 플랜 분석 실패 (응답: {raw[:100]}) — 기본값 사용")
@@ -451,17 +460,18 @@ def save_excel(results: list, output_path: str):
     headers = [
         "TC ID", "대분류", "소분류", "테스트 유형",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "테스트 상태", "비고 / 버그 링크", "우선순위",
+        "테스트 상태", "비고 / 버그 링크", "우선순위", "위험도", "자동화 가능여부",
     ]
-    col_widths = [14, 14, 16, 12, 35, 28, 45, 35, 12, 20, 10]
-    last_col_letter = "K"
+    col_widths = [14, 14, 16, 12, 35, 28, 45, 35, 12, 20, 10, 10, 14]
+    last_col_letter = "M"
 
     header_font  = Font(bold=True, color="FFFFFF")
     header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     data_align   = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    note_align   = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
-    priority_fills = {
+    level_fills = {
         "High":   PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid"),
         "Medium": PatternFill(start_color="FFF3CC", end_color="FFF3CC", fill_type="solid"),
         "Low":    PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid"),
@@ -481,18 +491,28 @@ def save_excel(results: list, output_path: str):
         ws.merge_cells(f"A1:{last_col_letter}1")
         ws.row_dimensions[1].height = 22
 
-        # 행 2: 컬럼 헤더
+        # 행 2: 요구사항 분석 (확인 필요한 질문 포함)
+        note_cell = ws.cell(row=2, column=1, value=item.get("augmented_spec", ""))
+        note_cell.font = Font(size=10, color="444444")
+        note_cell.alignment = note_align
+        ws.merge_cells(f"A2:{last_col_letter}2")
+        ws.row_dimensions[2].height = 140
+
+        # 행 3: 컬럼 헤더
         for col, (header, width) in enumerate(zip(headers, col_widths), start=1):
-            cell = ws.cell(row=2, column=col, value=header)
+            cell = ws.cell(row=3, column=col, value=header)
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = header_align
             ws.column_dimensions[cell.column_letter].width = width
-        ws.row_dimensions[2].height = 25
+        ws.row_dimensions[3].height = 25
+        # 자동화가능여부(M열)는 수동 테스트 수행 시 방해되지 않도록 기본 숨김 처리
+        # (자동화 대상 TC를 고를 때만 펼쳐서 확인)
+        ws.column_dimensions["M"].hidden = True
 
-        # 행 3~: TC 데이터
-        last_row = 2 + len(item["test_cases"])
-        for r_idx, tc in enumerate(item["test_cases"], start=3):
+        # 행 4~: TC 데이터
+        last_row = 3 + len(item["test_cases"])
+        for r_idx, tc in enumerate(item["test_cases"], start=4):
             ws.cell(row=r_idx, column=1,  value=tc.get("tc_id", "")).alignment = data_align
             ws.cell(row=r_idx, column=2,  value=tc.get("대분류", "")).alignment = data_align
             ws.cell(row=r_idx, column=3,  value=tc.get("소분류", "")).alignment = data_align
@@ -506,14 +526,25 @@ def save_excel(results: list, output_path: str):
             priority = tc.get("우선순위", "")
             p_cell = ws.cell(row=r_idx, column=11, value=priority)
             p_cell.alignment = data_align
-            if priority in priority_fills:
-                p_cell.fill = priority_fills[priority]
+            if priority in level_fills:
+                p_cell.fill = level_fills[priority]
+            risk = tc.get("위험도", "")
+            r_cell = ws.cell(row=r_idx, column=12, value=risk)
+            r_cell.alignment = data_align
+            if risk in level_fills:
+                r_cell.fill = level_fills[risk]
+            ws.cell(row=r_idx, column=13, value=tc.get("자동화가능여부", "")).alignment = data_align
             ws.row_dimensions[r_idx].height = 70
 
         # 테스트 상태 드롭다운 (I열): P / F / B / N/A
-        dv = DataValidation(type="list", formula1='"P,F,B,N/A"', allow_blank=True, showDropDown=False)
-        dv.sqref = f"I3:I{last_row}"
-        ws.add_data_validation(dv)
+        dv_status = DataValidation(type="list", formula1='"P,F,B,N/A"', allow_blank=True, showDropDown=False)
+        dv_status.sqref = f"I4:I{last_row}"
+        ws.add_data_validation(dv_status)
+
+        # 자동화 가능여부 드롭다운 (M열): 가능 / 불가능
+        dv_auto = DataValidation(type="list", formula1='"가능,불가능"', allow_blank=True, showDropDown=False)
+        dv_auto.sqref = f"M4:M{last_row}"
+        ws.add_data_validation(dv_auto)
 
     wb.save(output_path)
 
@@ -569,14 +600,14 @@ def save_to_sheets(results: list, sheet_id: str):
     headers = [
         "TC ID", "대분류", "소분류", "테스트 유형",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
-        "테스트 상태", "비고 / 버그 링크", "우선순위",
+        "테스트 상태", "비고 / 버그 링크", "우선순위", "위험도", "자동화 가능여부",
     ]
-    priority_colors = {
+    level_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
         "Low":    {"red": 0.85, "green": 0.92, "blue": 0.85},
     }
-    col_widths = [100, 110, 120, 110, 280, 200, 320, 260, 100, 160, 90]
+    col_widths = [100, 110, 120, 110, 280, 200, 320, 260, 100, 160, 90, 90, 110]
     total_tc = 0
 
     for item in results:
@@ -598,17 +629,27 @@ def save_to_sheets(results: list, sheet_id: str):
             "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
             "horizontalAlignment": "LEFT",
         })
-        ws.merge_cells("A1:K1")
+        ws.merge_cells("A1:M1")
 
-        # 행 2: 컬럼 헤더
-        ws.update([headers], "A2")
-        ws.format("A2:K2", {
+        # 행 2: 요구사항 분석 (확인 필요한 질문 포함)
+        ws.update([[item.get("augmented_spec", "")]], "A2")
+        ws.format("A2", {
+            "verticalAlignment": "TOP",
+            "horizontalAlignment": "LEFT",
+            "wrapStrategy": "WRAP",
+            "textFormat": {"fontSize": 9, "foregroundColor": {"red": 0.27, "green": 0.27, "blue": 0.27}},
+        })
+        ws.merge_cells("A2:M2")
+
+        # 행 3: 컬럼 헤더
+        ws.update([headers], "A3")
+        ws.format("A3:M3", {
             "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
             "horizontalAlignment": "CENTER",
         })
 
-        # 행 3~: TC 데이터
+        # 행 4~: TC 데이터
         rows_data = []
         for tc in item["test_cases"]:
             rows_data.append([
@@ -623,34 +664,39 @@ def save_to_sheets(results: list, sheet_id: str):
                 "",  # 테스트 상태
                 "",  # 연결 버그/비고
                 tc.get("우선순위", ""),
+                tc.get("위험도", ""),
+                tc.get("자동화가능여부", ""),
             ])
         if rows_data:
-            ws.update(rows_data, "A3")
-            end_row = 3 + len(rows_data)
+            ws.update(rows_data, "A4")
+            end_row = 4 + len(rows_data)
 
             # 데이터 셀 정렬: 세로=가운데, 가로=왼쪽
-            ws.format(f"A3:K{end_row - 1}", {
+            ws.format(f"A4:M{end_row - 1}", {
                 "verticalAlignment": "MIDDLE",
                 "horizontalAlignment": "LEFT",
                 "wrapStrategy": "WRAP",
             })
 
-            # 우선순위 색상 (K열만)
+            # 우선순위(K열)/위험도(L열) 색상
             for i, tc in enumerate(item["test_cases"]):
-                color = priority_colors.get(tc.get("우선순위", ""))
-                if color:
-                    ws.format(f"K{3 + i}", {"backgroundColor": color})
+                p_color = level_colors.get(tc.get("우선순위", ""))
+                if p_color:
+                    ws.format(f"K{4 + i}", {"backgroundColor": p_color})
+                r_color = level_colors.get(tc.get("위험도", ""))
+                if r_color:
+                    ws.format(f"L{4 + i}", {"backgroundColor": r_color})
 
-            # 기존 드롭다운 초기화 후 테스트 상태(I열) 드롭다운 재설정
+            # 기존 드롭다운 초기화 후 테스트 상태(I열)/자동화 가능여부(M열) 드롭다운 재설정
             sh.batch_update({"requests": [
                 {
                     "setDataValidation": {
                         "range": {
                             "sheetId": ws.id,
-                            "startRowIndex": 2,
+                            "startRowIndex": 3,
                             "endRowIndex": end_row,
                             "startColumnIndex": 0,
-                            "endColumnIndex": 11,
+                            "endColumnIndex": 13,
                         },
                     }
                 },
@@ -658,7 +704,7 @@ def save_to_sheets(results: list, sheet_id: str):
                     "setDataValidation": {
                         "range": {
                             "sheetId": ws.id,
-                            "startRowIndex": 2,
+                            "startRowIndex": 3,
                             "endRowIndex": end_row,
                             "startColumnIndex": 8,
                             "endColumnIndex": 9,
@@ -678,6 +724,28 @@ def save_to_sheets(results: list, sheet_id: str):
                         },
                     }
                 },
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 3,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 12,
+                            "endColumnIndex": 13,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": "가능"},
+                                    {"userEnteredValue": "불가능"},
+                                ],
+                            },
+                            "showCustomUi": True,
+                            "strict": False,
+                        },
+                    }
+                },
             ]})
 
             # 열 너비 설정
@@ -687,6 +755,15 @@ def save_to_sheets(results: list, sheet_id: str):
                 "fields": "pixelSize",
             }} for i, px in enumerate(col_widths)]
             sh.batch_update({"requests": requests_body})
+
+            # 자동화가능여부(M열, index 12)는 수동 테스트 수행 시 방해되지 않도록 기본 숨김 처리
+            sh.batch_update({"requests": [{
+                "updateDimensionProperties": {
+                    "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 12, "endIndex": 13},
+                    "properties": {"hiddenByUser": True},
+                    "fields": "hiddenByUser",
+                }
+            }]})
 
         total_tc += len(item["test_cases"])
         print(f"  '{sheet_title}' — TC {len(item['test_cases'])}개 저장")
@@ -705,13 +782,21 @@ _TEXT_FIXES = [
     (re.compile(r"\s*不存在"), " 존재하지 않음"),
     (re.compile(r"나타남"), "노출됨"),
 ]
-_FOREIGN_SCRIPT_PATTERN = re.compile(r"[一-鿿㐀-䶿぀-ヿ]+")
+# 화이트리스트 방식: 한글/영숫자/기본 문장부호/원화기호 외의 문자는 전부 제거 (한자·가나뿐 아니라 아랍·키릴 등 임의 외래문자 오염 방지)
+_FOREIGN_SCRIPT_PATTERN = re.compile(r"[^\x20-\x7E가-힣ㄱ-ㅎㅏ-ㅣ₩\t\n\r]+")
 _TC_ID_PATTERN = re.compile(r"^TC_(?:[A-Z]+_)?(\d+)$")
 
 # 한글에 공백 없이 붙은 영단어(예: "사진을registered") — AI가 문장을 끝맺지 못하고 영어로 누락한 패턴
 _DANGLING_LATIN_PATTERN = re.compile(r"([가-힣])([a-zA-Z]{2,})\b")
 _TRAILING_PARTICLE_PATTERN = re.compile(r"(을|를|이|가|은|는|에|와|과|의|로|으로|도)$")
 _KOREAN_ENDING_PATTERN = re.compile(r"(음|함|됨|임|완료)$")
+
+# 테스트 단계가 "~한다"체로 끝나는 경우 기존 "~함"체와 통일 (유형별 개별 호출로 인한 문체 혼재 보정)
+_DECLARATIVE_ENDING_PATTERN = re.compile(r"(한다|된다|않는다|간다|온다|본다)\.?\s*$")
+_DECLARATIVE_ENDING_MAP = {
+    "한다": "함", "된다": "됨", "않는다": "않음",
+    "간다": "감", "온다": "옴", "본다": "봄",
+}
 
 
 def _fix_dangling_latin(line):
@@ -725,8 +810,16 @@ def _fix_dangling_latin(line):
     return line
 
 
+def _normalize_step_ending(line):
+    """"~한다"체로 끝나는 줄을 "~함"체로 변환합니다."""
+    m = _DECLARATIVE_ENDING_PATTERN.search(line)
+    if not m:
+        return line
+    return line[: m.start(1)] + _DECLARATIVE_ENDING_MAP[m.group(1)]
+
+
 def _sanitize_text(value):
-    """문자열에 섞인 한자/일본어 가나/영단어 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거합니다."""
+    """문자열에 섞인 외래 문자·오타·금지 표현을 교정하고, "~한다"체를 "~함"체로 통일합니다."""
     if not isinstance(value, str):
         return value
     for pattern, replacement in _TEXT_FIXES:
@@ -734,8 +827,11 @@ def _sanitize_text(value):
     if _FOREIGN_SCRIPT_PATTERN.search(value):
         value = _FOREIGN_SCRIPT_PATTERN.sub("", value)
         value = re.sub(r"[ \t]{2,}", " ", value).strip()
-    if _DANGLING_LATIN_PATTERN.search(value):
-        value = "\n".join(_fix_dangling_latin(line) for line in value.split("\n"))
+    if _DANGLING_LATIN_PATTERN.search(value) or _DECLARATIVE_ENDING_PATTERN.search(value):
+        value = "\n".join(
+            _normalize_step_ending(_fix_dangling_latin(line))
+            for line in value.split("\n")
+        )
     return value
 
 
@@ -803,6 +899,7 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
             print(f"  [일일 한도 초과] {e}")
             print(f"  지금까지 처리된 {len(results)}개 티켓 결과로 저장합니다.")
             break
+        print(f"  --- 요구사항 분석 ---\n{augmented_spec}\n  ---")
         print(f"  TC 생성 중...")
         tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
         tc_list = filter_tc_list(tc_list)
@@ -815,6 +912,7 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
             "key": issue["key"],
             "summary": issue["summary"],
             "status": issue["status"],
+            "augmented_spec": augmented_spec,
             "test_cases": tc_list,
         })
 
