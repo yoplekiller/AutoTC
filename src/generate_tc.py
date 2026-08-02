@@ -536,15 +536,17 @@ def save_excel(results: list, output_path: str):
             ws.cell(row=r_idx, column=13, value=tc.get("자동화가능여부", "")).alignment = data_align
             ws.row_dimensions[r_idx].height = 70
 
-        # 테스트 상태 드롭다운 (I열): P / F / B / N/A
-        dv_status = DataValidation(type="list", formula1='"P,F,B,N/A"', allow_blank=True, showDropDown=False)
-        dv_status.sqref = f"I4:I{last_row}"
-        ws.add_data_validation(dv_status)
+        # TC가 0개(예: 한도 초과로 생성 중단)면 드롭다운을 걸 데이터 범위 자체가 없으므로 스킵
+        if item["test_cases"]:
+            # 테스트 상태 드롭다운 (I열): P / F / B / N/A
+            dv_status = DataValidation(type="list", formula1='"P,F,B,N/A"', allow_blank=True, showDropDown=False)
+            dv_status.sqref = f"I4:I{last_row}"
+            ws.add_data_validation(dv_status)
 
-        # 자동화 가능여부 드롭다운 (M열): 가능 / 불가능
-        dv_auto = DataValidation(type="list", formula1='"가능,불가능"', allow_blank=True, showDropDown=False)
-        dv_auto.sqref = f"M4:M{last_row}"
-        ws.add_data_validation(dv_auto)
+            # 자동화 가능여부 드롭다운 (M열): 가능 / 불가능
+            dv_auto = DataValidation(type="list", formula1='"가능,불가능"', allow_blank=True, showDropDown=False)
+            dv_auto.sqref = f"M4:M{last_row}"
+            ws.add_data_validation(dv_auto)
 
     wb.save(output_path)
 
