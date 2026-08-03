@@ -368,6 +368,13 @@ _DANGLING_LATIN_PATTERN = re.compile(r"([가-힣])([a-zA-Z]{2,})\b")
 _TRAILING_PARTICLE_PATTERN = re.compile(r"(을|를|이|가|은|는|에|와|과|의|로|으로|도)$")
 _KOREAN_ENDING_PATTERN = re.compile(r"(음|함|됨|임|완료)$")
 
+# 테스트 단계가 "~한다"체로 끝나는 경우 기존 "~함"체와 통일 (유형별 개별 호출로 인한 문체 혼재 보정)
+_DECLARATIVE_ENDING_PATTERN = re.compile(r"(한다|된다|않는다|간다|온다|본다)\.?\s*$")
+_DECLARATIVE_ENDING_MAP = {
+    "한다": "함", "된다": "됨", "않는다": "않음",
+    "간다": "감", "온다": "옴", "본다": "봄",
+}
+
 
 def _fix_dangling_latin(line):
     """한글 뒤에 붙은 영단어를 제거하고, 조사로 끝나 미완성된 문장을 보정합니다."""
@@ -380,8 +387,16 @@ def _fix_dangling_latin(line):
     return line
 
 
+def _normalize_step_ending(line):
+    """"~한다"체로 끝나는 줄을 "~함"체로 변환합니다."""
+    m = _DECLARATIVE_ENDING_PATTERN.search(line)
+    if not m:
+        return line
+    return line[: m.start(1)] + _DECLARATIVE_ENDING_MAP[m.group(1)]
+
+
 def _sanitize_text(value):
-    """문자열에 섞인 한자/일본어 가나/영단어 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거합니다."""
+    """문자열에 섞인 한자/일본어 가나/영단어 오타·금지 표현을 교정하고, 매핑이 없는 외래 문자는 제거하며, "~한다"체를 "~함"체로 통일합니다."""
     if not isinstance(value, str):
         return value
     for pattern, replacement in _TEXT_FIXES:
@@ -389,8 +404,11 @@ def _sanitize_text(value):
     if _FOREIGN_SCRIPT_PATTERN.search(value):
         value = _FOREIGN_SCRIPT_PATTERN.sub("", value)
         value = re.sub(r"[ \t]{2,}", " ", value).strip()
-    if _DANGLING_LATIN_PATTERN.search(value):
-        value = "\n".join(_fix_dangling_latin(line) for line in value.split("\n"))
+    if _DANGLING_LATIN_PATTERN.search(value) or _DECLARATIVE_ENDING_PATTERN.search(value):
+        value = "\n".join(
+            _normalize_step_ending(_fix_dangling_latin(line))
+            for line in value.split("\n")
+        )
     return value
 
 
