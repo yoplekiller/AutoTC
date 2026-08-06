@@ -59,39 +59,65 @@ def _first_line(message: str) -> str:
 
 
 def parse_report(report_path: str) -> dict:
-    """Playwright --reporter=json 출력 파일을 파싱합니다."""
+    """Playwright --reporter=json 출력 파일을 파싱합니다.
+
+    Playwright는 테스트별로 자체 판정(`test.status`: expected/unexpected/flaky/skipped)을
+    함께 기록합니다. retries가 설정된 환경(예: CI)에서 재시도 끝에 결국 통과한 테스트는
+    "flaky"로 표시되는데, 이를 실패로 잘못 집계하지 않도록 이 필드를 우선 사용합니다.
+    구버전 리포트처럼 이 필드가 없으면 마지막 시도 결과로 폴백합니다.
+    """
     with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
 
     stats = report.get("stats", {})
     failed_tests = []
-    passed = failed = skipped = 0
+    flaky_tests = []
+    passed = failed = skipped = flaky = 0
 
     for suite in report.get("suites", []):
         for spec in _walk_specs(suite):
             for test in spec.get("tests", []):
                 results = test.get("results", [])
                 last = results[-1] if results else {}
-                status = last.get("status", "skipped")
+                retry_count = len(results)
+                pw_status = test.get("status") or last.get("status", "skipped")
 
-                if status == "passed":
+                if pw_status in ("expected", "passed"):
                     passed += 1
-                elif status in FAILED_STATUSES:
+                elif pw_status == "skipped":
+                    skipped += 1
+                elif pw_status == "flaky":
+                    # 재시도 끝에 결국 통과 - 버그 리포트 대상은 아니지만 불안정성 신호로 별도 기록
+                    passed += 1
+                    flaky += 1
+                    failed_attempt = next(
+                        (r for r in results if r.get("status") in FAILED_STATUSES), last
+                    )
+                    error = (failed_attempt.get("error") or {}).get("message", "")
+                    flaky_tests.append({
+                        "title": spec.get("title", "(제목 없음)"),
+                        "project": test.get("projectName", "unknown"),
+                        "retry_count": retry_count,
+                        "error": _first_line(error),
+                    })
+                else:
+                    # unexpected: 재시도까지 모두 실패
                     failed += 1
                     error = (last.get("error") or {}).get("message", "")
                     failed_tests.append({
                         "title": spec.get("title", "(제목 없음)"),
                         "project": test.get("projectName", "unknown"),
-                        "status": status,
+                        "status": last.get("status", pw_status),
+                        "retry_count": retry_count,
                         "error": _first_line(error),
                     })
-                else:
-                    skipped += 1
 
     return {
         "passed": passed,
         "failed": failed,
         "skipped": skipped,
+        "flaky": flaky,
+        "flaky_tests": flaky_tests,
         "total": passed + failed + skipped,
         "duration_sec": round(stats.get("duration", 0) / 1000),
         "failed_tests": failed_tests,
