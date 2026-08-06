@@ -12,6 +12,7 @@ import sys
 import io
 import os
 import json
+import re
 import time
 import argparse
 from datetime import datetime
@@ -45,11 +46,16 @@ def _walk_specs(suite: dict):
         yield from _walk_specs(child)
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _first_line(message: str) -> str:
-    for line in message.splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
+    """실패 메시지에서 원인 파악에 필요한 핵심 줄만 추출합니다.
+    Playwright 에러 첫 줄은 매처 이름뿐인 경우가 많아(예: "expect(locator).toBeVisible() failed"),
+    실제 원인이 담긴 다음 줄들(Locator/strict mode violation 등)까지 몇 개 더 모아서 반환합니다."""
+    clean = _ANSI_ESCAPE_RE.sub("", message)
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    return " / ".join(lines[:4])[:400]
 
 
 def parse_report(report_path: str) -> dict:
