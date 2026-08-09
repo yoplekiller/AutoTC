@@ -176,12 +176,12 @@ def run_minutes(agenda: str, ticket_keys: list, response_url: str):
         issues = fetch_issues(ticket_keys) if ticket_keys else []
         plan = generate_minutes_content(groq_client, agenda, issues)
         today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
-        title = f"{plan.get('title', agenda)} ({today})"
+        title = f"{plan.get('title', agenda)} ({today}) [사전 아젠다 초안]"
         content = build_confluence_content(plan, issues)
         page = create_confluence_page(title, content)
 
         reply(response_url,
-            f":memo: *회의록 생성 완료*\n"
+            f":memo: *사전 아젠다 초안 생성 완료* (실제 회의 기록 아님, 메모 기반 정리는 CLI의 --notes-file 사용)\n"
             f">*제목:* <{page['url']}|{page['title']}>\n"
             f">*안건:* {agenda}"
         )

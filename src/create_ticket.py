@@ -120,7 +120,7 @@ Task일 경우:
     return sanitize(data)
 
 
-def _build_description(data: dict) -> str:
+def build_description(data: dict) -> str:
     """sections와 acceptance_criteria를 Jira 텍스트로 변환합니다."""
     lines = []
 
@@ -144,7 +144,7 @@ def _build_description(data: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def _jira_client() -> JIRA:
+def jira_client() -> JIRA:
     return JIRA(server=JIRA_URL, basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN))
 
 
@@ -152,12 +152,12 @@ def create_jira_ticket(ticket_data: dict, project_key: str = None, labels: list 
     """Jira REST API로 실제 티켓을 생성하고 결과를 반환합니다."""
     project_key = project_key or JIRA_PROJECT_KEY
 
-    jira = _jira_client()
+    jira = jira_client()
 
     issue_type = ticket_data.get("issue_type", "Task")
     priority   = ticket_data.get("priority", "Medium")
     summary    = ticket_data.get("summary", "제목 없음")
-    description = _build_description(ticket_data)
+    description = build_description(ticket_data)
 
     fields = {
         "project":     {"key": project_key},
@@ -183,7 +183,7 @@ def create_jira_ticket(ticket_data: dict, project_key: str = None, labels: list 
 def find_open_ticket_by_label(label: str, project_key: str = None) -> dict:
     """같은 label(재현 식별자)을 가진, Done이 아닌 티켓이 이미 있으면 반환합니다(중복 생성 방지용). 없으면 None."""
     project_key = project_key or JIRA_PROJECT_KEY
-    jira = _jira_client()
+    jira = jira_client()
 
     jql = f'project = "{project_key}" AND labels = "{label}" AND statusCategory != Done ORDER BY created DESC'
     issues = jira.search_issues(jql, maxResults=1)
@@ -196,5 +196,5 @@ def find_open_ticket_by_label(label: str, project_key: str = None) -> dict:
 
 def add_comment(issue_key: str, comment: str):
     """기존 티켓에 코멘트를 추가합니다(중복 대신 재발 기록용)."""
-    jira = _jira_client()
+    jira = jira_client()
     jira.add_comment(issue_key, comment)

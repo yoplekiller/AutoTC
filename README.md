@@ -10,7 +10,7 @@
 |------|------|----------|
 | **TC 생성** | Jira 티켓 → 스펙 추론 → 유형별 TC 자동 생성 | `generate_tc.py`, `watch_sheet.py` |
 | **릴리즈 판단** | Playwright 테스트 결과 → 실패 패턴 분석 → Go/Caution/No-Go 권고 | `release_report.py` |
-| **협업 자동화** | Slack 슬래시 커맨드로 기획서·회의록·Jira 티켓 생성 | `slack_app.py`, `app.py`, `create_ticket.py`, `generate_minutes.py`, `generate_test_plan.py` |
+| **협업 자동화** | Slack 슬래시 커맨드로 기획서·회의록·Jira 티켓 생성 | `slack_app.py`, `app.py`, `create_ticket.py`, `generate_tickets_from_spec.py`, `generate_minutes.py`, `generate_test_plan.py` |
 
 아래 내용은 핵심 모듈인 **TC 생성 파이프라인** 기준 설명입니다. 릴리즈 판단 파이프라인은 [QA Ops 파이프라인](#release_reportpy--릴리즈-판단-파이프라인) 섹션 참고.
 
@@ -159,8 +159,9 @@ AutoTC/
 │   ├── generate_context.py   # 서비스 컨텍스트 초안 AI 생성
 │   ├── generate_test_plan.py # 티켓 묶음 → Confluence 테스트 계획서 생성
 │   ├── generate_result_report.py # 티켓 + Playwright 결과 → Confluence 결과보고서 생성
-│   ├── generate_minutes.py   # 회의록 자동 생성
-│   ├── create_ticket.py      # 자연어 → Jira 티켓 자동 생성
+│   ├── generate_minutes.py   # 회의록 자동 생성 (--notes-file로 실제 메모 정리 / 없으면 사전 아젠다 초안)
+│   ├── create_ticket.py      # 자연어(짧은 설명) → Jira 티켓 1개 자동 생성
+│   ├── generate_tickets_from_spec.py # 기획서(파일/Confluence) → 에픽+하위 티켓 여러 개 자동 생성
 │   ├── slack_app.py          # Slack 슬래시 커맨드 (/tc, /review, /spec-review)
 │   └── utils.py              # 공통 유틸
 ├── app.py                    # Slack 커맨드 서버 (Flask, 로컬 + ngrok)

@@ -1,19 +1,30 @@
 """
-회의 안건 + Jira 티켓 기반 회의록 자동 생성 → Confluence 페이지 게시
+회의 메모 + Jira 티켓 기반 회의록 자동 생성 → Confluence 페이지 게시
+
+--notes-file로 실제 회의 메모(txt/md)를 넘기면 그 메모를 정리만 해서 회의록을 만든다
+(토론내용/조치항목/결정사항을 지어내지 않음). --notes-file 없이 안건만 넘기면 회의 전
+"사전 아젠다 초안"을 AI가 작성한다 — 이 경우 실제 회의 기록이 아니므로 제목에
+"[사전 아젠다 초안]"이 붙는다.
 
 사용법:
-  python src/generate_minutes.py "스프린트 1 킥오프"
-  python src/generate_minutes.py "버그 리뷰 회의" --tickets MKQA-1 MKQA-42
+  python src/generate_minutes.py "스프린트 1 킥오프" --notes-file notes/sprint1_kickoff.md
+  python src/generate_minutes.py "버그 리뷰 회의" --notes-file notes.txt --tickets MKQA-1 MKQA-42
   python src/generate_minutes.py "QA 주간 회의" --dry-run
 """
 
 import sys
+import io
 import os
 import re
 import json
 import argparse
 import base64
 from datetime import datetime
+
+# 두 번 감싸면 이전 래퍼가 GC될 때 내부 버퍼까지 닫혀 "I/O operation on closed file" 오류가 남
+# (generate_bug_report.py에서 처음 발견된 것과 동일한 패턴).
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import requests
 from groq import Groq
@@ -56,9 +67,85 @@ def fetch_issues(issue_keys: list) -> list:
     return issues
 
 
+# ── 메모 파일 ────────────────────────────────────────────────────────
+
+def read_notes_file(path: str) -> str:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"메모 파일을 찾을 수 없습니다: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    if not content:
+        raise ValueError(f"메모 파일이 비어 있습니다: {path}")
+    return content
+
+
 # ── AI ───────────────────────────────────────────────────────────────
 
+def summarize_minutes_from_notes(groq_client: Groq, agenda: str, notes: str, issues: list) -> dict:
+    """실제 회의 메모를 회의록 형식으로 정리한다. 메모에 없는 내용은 지어내지 않는다."""
+    issue_list = "\n".join(
+        f"- [{i['key']}] ({i['issue_type']}) {i['summary']}"
+        for i in issues
+    ) if issues else "없음"
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 회의록 정리 담당자입니다. "
+                    "제공된 실제 회의 메모를 구조화된 회의록으로 정리합니다. "
+                    "메모에 없는 내용은 절대 지어내지 마세요 — 시간, 발표자, 조치 항목, "
+                    "결정사항 등 메모에서 확인할 수 없는 값은 빈 문자열이나 빈 배열로 남겨두세요. "
+                    "반드시 JSON 형식으로만 응답하세요. "
+                    "반드시 순수한 한국어로만 작성하세요. "
+                    "TIN, TBD, N/A, ETC 등 영문 약어를 절대 사용하지 마세요. "
+                    "모든 내용은 완성된 한국어 문장으로 작성하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"""다음은 실제 회의 중 작성된 메모입니다. 이 메모를 회의록 형식으로 정리해주세요.
+추측이나 창작 없이, 메모에 있는 내용만 반영하세요.
+
+회의 안건: {agenda}
+
+회의 메모:
+{notes}
+
+관련 Jira 티켓:
+{issue_list}
+
+아래 JSON 형식으로만 응답하세요. 마크다운 없이 JSON만 출력하세요.
+
+{{
+  "title": "회의록 제목",
+  "objective": "메모에서 파악되는 회의 목표 (메모에 명시되지 않았다면 빈 문자열)",
+  "topics": [
+    {{
+      "time": "메모에 시간이 명시된 경우만 채우고, 없으면 빈 문자열",
+      "topic": "메모에서 다룬 주제",
+      "presenter": "메모에 발표자가 명시된 경우만 채우고, 없으면 빈 문자열",
+      "note": "메모 내용을 정리한 논의 내용"
+    }}
+  ],
+  "action_items": ["메모에 명시된 조치 항목만"],
+  "decisions": ["메모에 명시된 결정 사항만"]
+}}""",
+            },
+        ],
+    )
+
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return sanitize(json.loads(raw))
+
+
 def generate_minutes_content(groq_client: Groq, agenda: str, issues: list) -> dict:
+    """메모 없이 안건만으로 회의 전 '사전 아젠다 초안'을 창작한다.
+    실제 회의 기록이 아니므로 호출부에서 반드시 그 사실을 표시할 것 (main()의 [사전 아젠다 초안] 라벨 참고)."""
     issue_list = "\n".join(
         f"- [{i['key']}] ({i['issue_type']}) {i['summary']}"
         for i in issues
@@ -243,8 +330,9 @@ def send_slack_notification(page: dict, agenda: str):
 # ── 메인 ─────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="회의 안건 기반 회의록 → Confluence 자동 생성")
+    parser = argparse.ArgumentParser(description="회의 메모 기반 회의록 → Confluence 자동 생성")
     parser.add_argument("agenda", help="회의 안건 (예: '스프린트 1 킥오프')")
+    parser.add_argument("--notes-file", default=None, help="회의 중 작성한 메모 파일 경로(.txt/.md) — 지정하면 메모를 정리, 없으면 사전 아젠다 초안 생성")
     parser.add_argument("--tickets", nargs="*", default=[], help="관련 Jira 티켓 키 (예: MKQA-1 MKQA-2)")
     parser.add_argument("--space", default=None, help="Confluence 스페이스 키 (기본: QATEST)")
     parser.add_argument("--dry-run", action="store_true", help="Confluence에 올리지 않고 내용만 출력")
@@ -261,10 +349,20 @@ def main():
         print(f"\nJira 티켓 조회 중...")
         issues = fetch_issues(args.tickets)
 
-    print(f"\nAI 회의록 작성 중...")
-    plan = generate_minutes_content(groq_client, args.agenda, issues)
+    is_draft = args.notes_file is None
+    if is_draft:
+        print(f"\n[안내] --notes-file 없이 실행 — 실제 회의 기록이 아닌 사전 아젠다 초안을 생성합니다.")
+        print(f"AI 사전 아젠다 초안 작성 중...")
+        plan = generate_minutes_content(groq_client, args.agenda, issues)
+    else:
+        print(f"\n메모 파일 읽는 중: {args.notes_file}")
+        notes = read_notes_file(args.notes_file)
+        print(f"AI 회의록 정리 중 (메모 기반, 창작 없음)...")
+        plan = summarize_minutes_from_notes(groq_client, args.agenda, notes, issues)
 
     title = f"{plan.get('title', args.agenda)} ({today})"
+    if is_draft:
+        title += " [사전 아젠다 초안]"
 
     print(f"\n[생성 결과 미리보기]")
     print(f"  제목   : {title}")
