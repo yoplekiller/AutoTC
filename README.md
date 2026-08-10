@@ -9,6 +9,7 @@
 | 영역 | 기능 | 핵심 파일 |
 |------|------|----------|
 | **TC 생성** | Jira 티켓 → 스펙 추론 → 유형별 TC 자동 생성 | `generate_tc.py`, `watch_sheet.py` |
+| **TC 생성(기획서 기반)** | 기획서(Confluence/로컬 파일) → 스펙 추론 → 유형별 TC 자동 생성 (티켓화 전 단계용) | `generate_tc_from_spec.py` |
 | **릴리즈 판단** | Playwright 테스트 결과 → 실패 패턴 분석 → Go/Caution/No-Go 권고 | `release_report.py` |
 | **협업 자동화** | Slack 슬래시 커맨드로 기획서·회의록·Jira 티켓 생성 | `slack_app.py`, `app.py`, `create_ticket.py`, `generate_tickets_from_spec.py`, `generate_minutes.py`, `generate_test_plan.py` |
 
@@ -153,6 +154,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 AutoTC/
 ├── src/
 │   ├── generate_tc.py        # 단일/일괄 TC 생성 (CLI) — 동적 플랜 포함
+│   ├── generate_tc_from_spec.py # 기획서(파일/Confluence) → TC 생성 (Jira 티켓 없이, 항상 에픽 기준 최소 수량 적용)
 │   ├── watch_sheet.py        # 구글 시트 폴링 + TC 자동 생성 (메인)
 │   ├── release_report.py     # Playwright 결과 → AI 릴리즈 판단 → Slack 전송
 │   ├── generate_spec.py      # 티켓 기반 기획서 자동 생성
@@ -196,6 +198,11 @@ python src/generate_tc.py MKQA-1 --context kream
 # 4. 엑셀 일괄 처리 (A열에 티켓 키 목록)
 python src/generate_tc.py --template        # 입력 템플릿 생성
 python src/generate_tc.py tickets.xlsx --context kream
+
+# 5. 기획서 기반 TC 생성 (티켓화 전 단계, Jira 티켓 불필요)
+python src/generate_tc_from_spec.py --spec-file spec.md
+python src/generate_tc_from_spec.py --confluence-url https://xxx.atlassian.net/wiki/spaces/.../pages/123
+python src/generate_tc_from_spec.py --confluence-title "월급까지 - Phase 1 기획서"
 
 # 5. 구글 시트 폴링 실행
 python src/watch_sheet.py

@@ -28,7 +28,8 @@ import argparse
 from datetime import datetime
 from difflib import SequenceMatcher
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -509,9 +510,12 @@ def save_excel(results: list, output_path: str):
         ws = wb.create_sheet(title=sheet_title)
 
         # 행 1: 티켓 URL 정보 (하이퍼링크)
-        ticket_url = f"{JIRA_URL}/browse/{item['key']}"
+        # item에 "url"이 명시되어 있으면(예: 기획서 기반 생성의 Confluence 페이지) 그걸 우선 쓰고,
+        # 없으면 기존처럼 Jira 티켓 링크로 조립한다. 링크가 없는 경우(로컬 기획서 파일 등)는 하이퍼링크를 걸지 않는다.
+        ticket_url = item.get("url", f"{JIRA_URL}/browse/{item['key']}")
         info_cell = ws.cell(row=1, column=1, value=f"{item['key']}  |  {item['summary']}")
-        info_cell.hyperlink = ticket_url
+        if ticket_url:
+            info_cell.hyperlink = ticket_url
         info_cell.font = Font(bold=True, color="0563C1", underline="single", size=11)
         info_cell.fill = PatternFill(start_color="EBF3FB", end_color="EBF3FB", fill_type="solid")
         info_cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -653,7 +657,8 @@ def save_to_sheets(results: list, sheet_id: str):
 
     for item in results:
         sheet_title = item["summary"][:100]
-        ticket_url = f"{JIRA_URL}/browse/{item['key']}"
+        # save_excel과 동일한 규칙: item["url"]이 있으면(기획서/Confluence 기반) 그걸 쓰고, 없으면 Jira 링크로 조립
+        ticket_url = item.get("url", f"{JIRA_URL}/browse/{item['key']}")
 
         try:
             ws = sh.worksheet(sheet_title)
@@ -664,7 +669,8 @@ def save_to_sheets(results: list, sheet_id: str):
             print(f"  '{sheet_title}' 시트 생성")
 
         # 행 1: 티켓 URL 정보
-        ws.update([[f"{item['key']}  |  {item['summary']}  |  {ticket_url}"]], "A1")
+        header_text = f"{item['key']}  |  {item['summary']}  |  {ticket_url}" if ticket_url else f"{item['key']}  |  {item['summary']}"
+        ws.update([[header_text]], "A1")
         ws.format("A1", {
             "backgroundColor": {"red": 0.922, "green": 0.953, "blue": 0.984},
             "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
