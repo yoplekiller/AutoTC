@@ -2,18 +2,25 @@
 구글 시트 폴링 기반 TC 자동 생성 스크립트
 
 [동작 방식]
-1. 구글 시트 '티켓 입력' 탭의 A열(티켓 URL/키)을 스캔
-2. B열(상태)이 비어있는 행을 '미처리'로 인식
-3. Groq AI로 TC 생성 후 '매뉴얼 TC' 탭에 append
-4. B열 → '완료', C열 → 처리 시각으로 업데이트
+1. 구글 시트 '티켓 입력' 탭의 A열(URL/키)을 스캔
+2. C열(상태)이 비어있는 행을 '미처리'로 인식
+3. Groq AI로 TC 생성 후 티켓/기획서별 시트에 저장
+4. C열 → '완료', D열 → 처리 시각으로 업데이트
 5. Slack 알림 발송
 
 [시트 구조 - '티켓 입력' 탭]
   A열: 티켓 URL/이슈 키(예: MKQA-1, Jira URL) 또는 기획서 Confluence 페이지 URL
        (.../wiki/spaces/.../pages/숫자ID/... 형태면 자동으로 기획서 기반 파이프라인으로 처리됨,
         Jira 티켓 없이도 항상 "에픽" 기준 최소 TC 수량 적용)
-  B열: 상태 (비워두면 대기 → 완료로 자동 업데이트)
-  C열: 처리 시각 (자동 기입)
+  B열: 기획서 제목(선택) — A열이 기획서 URL일 때만 의미 있음. 값을 넣으면 Confluence에서
+       자동 추출한 제목(본문 첫 줄) 대신 이 제목을 그대로 사용(결과 시트 탭 이름/헤더에 표시됨).
+       비워두면 기존처럼 자동 추출. Jira 티켓 행에서는 무시됨.
+  C열: 상태 (비워두면 대기 → 완료로 자동 업데이트)
+  D열: 처리 시각 (자동 기입)
+
+  기존에 A/상태/처리시각 3열 스키마로 쓰던 시트는 처음 실행될 때 B열에 "기획서 제목" 컬럼을
+  자동으로 끼워넣는 1회성 마이그레이션이 실행된다(기존 데이터·기존 뒤쪽 컬럼은 오른쪽으로 밀리기만
+  하고 값은 그대로 보존됨).
 
 [실행]
   python src/watch_sheet.py
@@ -96,8 +103,8 @@ def get_or_create_worksheet(sh, title: str, rows=1000, cols=10):
 
 def scan_pending_rows(ws_input) -> list:
     """
-    '티켓 입력' 시트에서 B열이 비어있는 행을 반환.
-    반환: [{"row_idx": 2, "raw_value": "MKQA-1"}, ...]
+    '티켓 입력' 시트에서 C열(상태)이 비어있는 행을 반환.
+    반환: [{"row_idx": 2, "raw_value": "MKQA-1", "title": ""}, ...]
     """
     all_values = ws_input.get_all_values()  # 전체 행 리스트
 
@@ -106,9 +113,10 @@ def scan_pending_rows(ws_input) -> list:
         if i == 0:  # 헤더 스킵
             continue
         a_val = row[0].strip() if len(row) > 0 else ""
-        b_val = row[1].strip() if len(row) > 1 else ""
-        if a_val and not b_val:
-            pending.append({"row_idx": i + 1, "raw_value": a_val})  # 1-based
+        b_val = row[1].strip() if len(row) > 1 else ""  # 기획서 제목(선택)
+        c_val = row[2].strip() if len(row) > 2 else ""  # 상태
+        if a_val and not c_val:
+            pending.append({"row_idx": i + 1, "raw_value": a_val, "title": b_val})  # 1-based
 
     return pending
 
@@ -927,8 +935,8 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
         augmented_spec = augment_ticket_spec(groq_client, issue, context)
     except DailyTokenLimitError:
         print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
-        ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
-        ws_input.update_cell(row_idx, 3, timestamp)
+        ws_input.update_cell(row_idx, 3, "오류: 일일 토큰 한도 초과")
+        ws_input.update_cell(row_idx, 4, timestamp)
         return None, True
 
     print(f"  TC 생성 중...")
@@ -942,8 +950,8 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
         tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
     except DailyTokenLimitError:
         print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
-        ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
-        ws_input.update_cell(row_idx, 3, timestamp)
+        ws_input.update_cell(row_idx, 3, "오류: 일일 토큰 한도 초과")
+        ws_input.update_cell(row_idx, 4, timestamp)
         return None, True
     tc_list = filter_tc_list(tc_list)
     tc_list = dedupe_tc_list(tc_list)
@@ -960,9 +968,9 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
 
 
 def mark_row_review_pending(ws_input, row_idx: int, timestamp: str):
-    """입력 시트 해당 행의 B열=생성 완료(AI 생성 완료, 사람 확인 필요), C열=처리시각으로 업데이트."""
-    ws_input.update_cell(row_idx, 2, "생성 완료")
-    ws_input.update_cell(row_idx, 3, timestamp)
+    """입력 시트 해당 행의 C열=생성 완료(AI 생성 완료, 사람 확인 필요), D열=처리시각으로 업데이트."""
+    ws_input.update_cell(row_idx, 3, "생성 완료")
+    ws_input.update_cell(row_idx, 4, timestamp)
 
 
 # ── Slack 알림 ────────────────────────────────────────────────────────
@@ -1017,16 +1025,33 @@ def main():
     # 입력 시트 확인
     ws_input = get_or_create_worksheet(sh, INPUT_SHEET_NAME)
 
-    # 헤더 확인 (1행이 비어있으면 헤더 추가)
+    # 헤더 확인 / 마이그레이션
     first_row = ws_input.row_values(1)
+    new_header = ["티켓 URL 또는 이슈 키", "기획서 제목(선택)", "상태", "처리 시각"]
+    header_format = {
+        "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
+        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        "horizontalAlignment": "CENTER",
+    }
+
     if not first_row or first_row[0] != "티켓 URL 또는 이슈 키":
-        ws_input.insert_row(["티켓 URL 또는 이슈 키", "상태", "처리 시각"], index=1)
-        ws_input.format("A1:C1", {
-            "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-            "horizontalAlignment": "CENTER",
-        })
+        # 시트가 비어있거나 헤더가 아예 없는 경우 — 새로 만든다.
+        ws_input.insert_row(new_header, index=1)
+        ws_input.format("A1:D1", header_format)
         print(f"  '{INPUT_SHEET_NAME}' 헤더 추가 완료")
+    elif len(first_row) < 2 or first_row[1] != "기획서 제목(선택)":
+        # 기존 3열(URL/상태/처리시각) 스키마 → B열에 "기획서 제목" 컬럼을 끼워넣는 1회성 마이그레이션.
+        # 기존 데이터가 아래로 밀리지 않도록 행이 아니라 열을 삽입해서, 기존 값은 오른쪽으로만
+        # 이동시킨다(예: 기존 B/C/D열의 상태·처리시각·검수완료여부 데이터는 그대로 C/D/E로 이동).
+        sh.batch_update({"requests": [{
+            "insertDimension": {
+                "range": {"sheetId": ws_input.id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
+                "inheritFromBefore": False,
+            }
+        }]})
+        ws_input.update([new_header], "A1:D1")
+        ws_input.format("A1:D1", header_format)
+        print(f"  '{INPUT_SHEET_NAME}' 기존 3열 스키마 감지 → B열에 '기획서 제목' 컬럼 삽입 (마이그레이션 완료)")
 
     # 미처리 행 스캔
     pending = scan_pending_rows(ws_input)
@@ -1050,6 +1075,7 @@ def main():
     for item in pending:
         raw = item["raw_value"]
         row_idx = item["row_idx"]
+        title = item.get("title", "")  # B열: 기획서 제목(선택), Jira 티켓 행에서는 항상 빈 문자열
 
         print(f"\n처리 중: {raw} (행 {row_idx})")
 
@@ -1059,11 +1085,16 @@ def main():
             spec = fetch_confluence_page(raw)
             if not spec:
                 print(f"  [건너뜀] 기획서 페이지를 가져오지 못했습니다: {raw}")
-                ws_input.update_cell(row_idx, 2, "오류: 기획서 조회 실패")
-                ws_input.update_cell(row_idx, 3, timestamp)
+                ws_input.update_cell(row_idx, 3, "오류: 기획서 조회 실패")
+                ws_input.update_cell(row_idx, 4, timestamp)
                 continue
 
-            issue = build_pseudo_issue_from_spec(spec, slugify_spec_key(raw), raw)
+            key_source = title or raw
+            issue = build_pseudo_issue_from_spec(spec, slugify_spec_key(key_source), raw)
+            if title:
+                # B열에 사람이 직접 적은 제목이 있으면, Confluence 본문 첫 줄 추출보다 우선한다
+                # (본문 구조가 지저분하면 첫 줄이 실제 제목과 다를 수 있어서).
+                issue["summary"] = title
             print(f"  제목: {issue['summary']}")
             spec_context = context
 
@@ -1073,16 +1104,16 @@ def main():
                 issue_key = extract_issue_key(raw)
             except ValueError as e:
                 print(f"  [건너뜀] {e}")
-                ws_input.update_cell(row_idx, 2, "오류: 유효하지 않은 티켓")
-                ws_input.update_cell(row_idx, 3, timestamp)
+                ws_input.update_cell(row_idx, 3, "오류: 유효하지 않은 티켓")
+                ws_input.update_cell(row_idx, 4, timestamp)
                 continue
 
             try:
                 issue = fetch_issue(jira, issue_key)
             except Exception as e:
                 print(f"  [건너뜀] Jira 조회 실패: {e}")
-                ws_input.update_cell(row_idx, 2, "오류: Jira 조회 실패")
-                ws_input.update_cell(row_idx, 3, timestamp)
+                ws_input.update_cell(row_idx, 3, "오류: Jira 조회 실패")
+                ws_input.update_cell(row_idx, 4, timestamp)
                 continue
 
             print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
