@@ -16,6 +16,10 @@ generate_tc.py의 파이프라인(요구사항 추론 → 유형별 TC 플랜 �
   python src/generate_tc_from_spec.py --confluence-title "월급까지 - Phase 1 기획서"
   python src/generate_tc_from_spec.py --spec-file spec.md --context kream
   python src/generate_tc_from_spec.py --spec-file spec.md --key SPEC-PAYDAY-P1
+
+  # 로컬 저장과 별개로, 티켓 기반 flow가 쓰는 것과 같은 구글 스프레드시트(SPREADSHEET_ID)에
+  # 결과 탭을 하나 추가로 만들고 싶을 때(옵트인, 기본은 로컬 저장만)
+  python src/generate_tc_from_spec.py --spec-file spec.md --sheet
 """
 
 import argparse
@@ -48,6 +52,7 @@ from src.generate_tc import (
     generate_test_cases,
     load_context,
     save_excel,
+    save_to_sheets,
 )
 from src.generate_tickets_from_spec import (
     find_confluence_url_by_title,
@@ -117,6 +122,11 @@ def main():
     parser.add_argument("--space", default=None, help="Confluence 스페이스 키 (--confluence-title과 함께 사용, 기본: QATEST)")
     parser.add_argument("--context", default="", help="서비스 컨텍스트 이름 (예: kream, kurly)")
     parser.add_argument("--key", default=None, help="결과 식별용 키 (미지정 시 기획서 제목/파일명에서 자동 생성)")
+    parser.add_argument(
+        "--sheet",
+        action="store_true",
+        help="로컬 저장과 별개로, SPREADSHEET_ID 환경변수의 구글 시트에도 결과를 새 탭으로 저장 (기본: 안 함)",
+    )
     args = parser.parse_args()
 
     context = load_context(args.context)
@@ -178,6 +188,15 @@ def main():
     xlsx_path = f"reports/tc_{label}_{timestamp}.xlsx"
     save_excel([result], xlsx_path)
     print(f"  엑셀 저장 완료: {xlsx_path}")
+
+    if args.sheet:
+        sheet_id = os.getenv("SPREADSHEET_ID", "")
+        if not sheet_id:
+            print("  [경고] --sheet를 줬지만 SPREADSHEET_ID 환경변수가 없어 구글 시트 저장을 건너뜁니다.")
+        else:
+            print("  구글 시트에 저장 중...")
+            save_to_sheets([result], sheet_id)
+            print("  구글 시트 저장 완료")
 
     print(f"\n=== 완료: {len(result['test_cases'])}개 TC 생성 ===")
 

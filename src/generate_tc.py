@@ -725,14 +725,19 @@ def save_to_sheets(results: list, sheet_id: str):
                 "wrapStrategy": "WRAP",
             })
 
-            # 우선순위(K열)/위험도(L열) 색상
+            # 우선순위(K열)/위험도(L열) 색상 — 셀 하나당 ws.format() 호출 1번씩 하면 TC가 많을 때
+            # (기획서 기반 생성처럼 40~50개 이상 나오는 경우) 분당 쓰기 요청 할당량(429)을 바로 초과한다.
+            # 실제로 --sheet 옵션 실전 검증 중 57개 TC로 재현됨. batch_format으로 모아서 한 번에 보낸다.
+            color_requests = []
             for i, tc in enumerate(item["test_cases"]):
                 p_color = level_colors.get(tc.get("우선순위", ""))
                 if p_color:
-                    ws.format(f"K{4 + i}", {"backgroundColor": p_color})
+                    color_requests.append({"range": f"K{4 + i}", "format": {"backgroundColor": p_color}})
                 r_color = level_colors.get(tc.get("위험도", ""))
                 if r_color:
-                    ws.format(f"L{4 + i}", {"backgroundColor": r_color})
+                    color_requests.append({"range": f"L{4 + i}", "format": {"backgroundColor": r_color}})
+            if color_requests:
+                ws.batch_format(color_requests)
 
             # 기존 드롭다운 초기화 후 테스트 상태(I열)/자동화 가능여부(M열) 드롭다운 재설정
             sh.batch_update({"requests": [
