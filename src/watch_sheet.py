@@ -925,17 +925,26 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
     print("  요구사항 추론 중...")
     try:
         augmented_spec = augment_ticket_spec(groq_client, issue, context)
-    except Exception as e:
-        e_str = str(e).lower()
-        if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
-            print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
-            ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
-            ws_input.update_cell(row_idx, 3, timestamp)
-            return None, True
-        raise
+    except DailyTokenLimitError:
+        print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
+        ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
+        ws_input.update_cell(row_idx, 3, timestamp)
+        return None, True
 
     print(f"  TC 생성 중...")
-    tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
+    # analyze_spec_for_plan(TC 플랜 결정 단계)도 augment_ticket_spec과 별도로 Groq를 호출하고
+    # 별도로 DailyTokenLimitError를 던질 수 있는데, 이 호출은 여태 감싸지 않고 있었다 —
+    # 실제 GitHub Actions 실행(2026-08-10)에서 이걸로 크래시(uncaught exception, exit 1)가
+    # 재현됨. 위와 동일하게 처리한다. (이전엔 문자열 매칭(`"per day" in str(e)`)으로 판별했는데,
+    # DailyTokenLimitError 자신의 메시지("Groq 일일 토큰 한도 초과")엔 그 영문 substring이 없어서
+    # 실제로는 안 걸리고 그대로 재발생(raise)하던 것도 같이 바로잡음 — 타입으로 직접 잡는다.
+    try:
+        tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
+    except DailyTokenLimitError:
+        print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
+        ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
+        ws_input.update_cell(row_idx, 3, timestamp)
+        return None, True
     tc_list = filter_tc_list(tc_list)
     tc_list = dedupe_tc_list(tc_list)
     tc_list = [normalize_tc_id(tc, i) for i, tc in enumerate(tc_list, start=1)]
