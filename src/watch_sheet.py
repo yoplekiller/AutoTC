@@ -9,7 +9,9 @@
 5. Slack 알림 발송
 
 [시트 구조 - '티켓 입력' 탭]
-  A열: 티켓 URL 또는 이슈 키 (예: MKQA-1 또는 Jira URL)
+  A열: 티켓 URL/이슈 키(예: MKQA-1, Jira URL) 또는 기획서 Confluence 페이지 URL
+       (.../wiki/spaces/.../pages/숫자ID/... 형태면 자동으로 기획서 기반 파이프라인으로 처리됨,
+        Jira 티켓 없이도 항상 "에픽" 기준 최소 TC 수량 적용)
   B열: 상태 (비워두면 대기 → 완료로 자동 업데이트)
   C열: 처리 시각 (자동 기입)
 
@@ -27,7 +29,8 @@ import argparse
 from datetime import datetime
 from difflib import SequenceMatcher
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import requests
 from jira import JIRA
@@ -120,6 +123,38 @@ def extract_issue_key(input_str: str) -> str:
     if key_match:
         return input_str.strip()
     raise ValueError(f"유효하지 않은 티켓: {input_str}")
+
+
+def is_confluence_spec_url(raw: str) -> bool:
+    """'티켓 입력' A열 값이 Jira 티켓이 아니라 기획서(Confluence 페이지) URL인지 판별한다.
+
+    Jira 티켓 URL(/browse/KEY-123)과는 경로 형태가 다르므로(/wiki/.../pages/숫자ID),
+    둘을 혼동할 일은 없다.
+    """
+    return bool(re.search(r"atlassian\.net/wiki/.+/pages/\d+", raw))
+
+
+def slugify_spec_key(text: str) -> str:
+    """기획서 URL/제목에서 결과 시트 식별용 키를 만든다."""
+    slug = re.sub(r"[^0-9A-Za-z가-힣]+", "_", text).strip("_")
+    return (slug[:40] or "SPEC").upper()
+
+
+def build_pseudo_issue_from_spec(spec: str, key: str, url: str) -> dict:
+    """기획서 원문을 이 파일의 augment_ticket_spec/generate_test_cases가 기대하는
+    issue 딕셔너리 형태로 감싼다. issue_type을 "에픽"으로 고정하는 이유: 기획서는
+    티켓 하나보다 범위가 넓은 문서이므로 analyze_spec_for_plan()의 유형별 최소 TC
+    기준 중 가장 넓은 Epic 기준을 적용받도록 한다.
+    """
+    first_line = next((line.strip("# ").strip() for line in spec.splitlines() if line.strip()), "")
+    return {
+        "key": key,
+        "summary": first_line[:200] or "기획서",
+        "status": "기획",
+        "description": spec,
+        "issue_type": "에픽",
+        "url": url,
+    }
 
 
 def fetch_issue(jira: JIRA, issue_key: str) -> dict:
@@ -766,7 +801,8 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
         print(f"  '{sheet_title}' 시트 생성")
 
     # 행 1: 티켓 URL 정보 + 검수 안내 배너
-    ticket_url = f"{JIRA_URL}/browse/{issue['key']}"
+    # issue에 "url"이 있으면(기획서 URL 직접 입력 경로) 그걸 쓰고, 없으면 기존처럼 Jira 링크로 조립
+    ticket_url = issue.get("url", f"{JIRA_URL}/browse/{issue['key']}")
     ws.update(
         [[f"{issue['key']}  |  {issue['summary']}  |  {ticket_url}  |  생성: {generated_at}"
           f"  |  ⚠️ AI 자동 생성 TC — 실행 전 QA 검수·보완 필요"]],
@@ -816,11 +852,17 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
             "wrapStrategy": "WRAP",
         })
 
-        # 우선순위 색상 (E열만)
+        # 우선순위 색상 (E열만) — 셀 하나당 ws.format() 호출 1번씩 하면 TC가 많을 때
+        # (기획서 URL 직접 입력처럼 40~50개 이상 나오는 경우) 분당 쓰기 요청 할당량(429)을
+        # 초과한다. generate_tc.py의 save_to_sheets에서 실제로 재현/수정한 것과 같은 버그라
+        # 여기도 동일하게 batch_format으로 모아서 한 번에 보낸다.
+        color_requests = []
         for i, tc in enumerate(tc_list):
             color = priority_colors.get(tc.get("우선순위", ""))
             if color:
-                ws.format(f"E{3 + i}", {"backgroundColor": color})
+                color_requests.append({"range": f"E{3 + i}", "format": {"backgroundColor": color}})
+        if color_requests:
+            ws.batch_format(color_requests)
 
         # 기존 드롭다운 초기화 후 테스트 상태(K열) 드롭다운 재설정
         sh.batch_update({"requests": [
@@ -870,6 +912,42 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     sh.batch_update({"requests": requests_body})
 
     print(f"  '{sheet_title}' 시트에 TC {len(tc_list)}개 저장 완료")
+
+
+def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, row_idx: int, timestamp: str):
+    """요구사항 추론 → TC 생성 → 필터/중복제거 → 시트 저장 → 입력행 상태 업데이트.
+
+    Jira 티켓 경로와 기획서 URL 직접 입력 경로가 issue 딕셔너리만 다르게 만들어서
+    이 함수로 합류한다(이후 로직은 완전히 동일).
+
+    반환: (processed 요약 dict 또는 None, 일일 토큰 한도로 이후 처리를 중단해야 하면 True)
+    """
+    print("  요구사항 추론 중...")
+    try:
+        augmented_spec = augment_ticket_spec(groq_client, issue, context)
+    except Exception as e:
+        e_str = str(e).lower()
+        if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+            print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
+            ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
+            ws_input.update_cell(row_idx, 3, timestamp)
+            return None, True
+        raise
+
+    print(f"  TC 생성 중...")
+    tc_list = generate_test_cases(groq_client, issue, augmented_spec, context)
+    tc_list = filter_tc_list(tc_list)
+    tc_list = dedupe_tc_list(tc_list)
+    tc_list = [normalize_tc_id(tc, i) for i, tc in enumerate(tc_list, start=1)]
+    print(f"  생성된 TC: {len(tc_list)}개")
+    for tc in tc_list:
+        print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
+
+    create_ticket_sheet(sh, issue, tc_list, timestamp)
+    mark_row_review_pending(ws_input, row_idx, timestamp)
+    print(f"  상태 업데이트: 검수 대기")
+
+    return {"key": issue["key"], "summary": issue["summary"], "tc_count": len(tc_list)}, False
 
 
 def mark_row_review_pending(ws_input, row_idx: int, timestamp: str):
@@ -966,58 +1044,48 @@ def main():
 
         print(f"\n처리 중: {raw} (행 {row_idx})")
 
-        # 티켓 키 추출
-        try:
-            issue_key = extract_issue_key(raw)
-        except ValueError as e:
-            print(f"  [건너뜀] {e}")
-            ws_input.update_cell(row_idx, 2, "오류: 유효하지 않은 티켓")
-            ws_input.update_cell(row_idx, 3, timestamp)
-            continue
-
-        # Jira 조회
-        try:
-            issue = fetch_issue(jira, issue_key)
-        except Exception as e:
-            print(f"  [건너뜀] Jira 조회 실패: {e}")
-            ws_input.update_cell(row_idx, 2, "오류: Jira 조회 실패")
-            ws_input.update_cell(row_idx, 3, timestamp)
-            continue
-
-        print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
-
-        # spec 파일 자동 탐색 또는 생성
-        spec_context = get_or_generate_spec(groq_client, issue, context)
-
-        # TC 생성
-        print(f"  요구사항 추론 중...")
-        try:
-            augmented_spec = augment_ticket_spec(groq_client, issue, spec_context)
-        except Exception as e:
-            e_str = str(e).lower()
-            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
-                print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 티켓 처리 중단")
-                ws_input.update_cell(row_idx, 2, "오류: 일일 토큰 한도 초과")
+        if is_confluence_spec_url(raw):
+            # ── 기획서(Confluence 페이지) URL 직접 입력 경로 — Jira 티켓 없이 바로 TC 생성
+            print("  기획서(Confluence) URL로 인식 — 기획서 기반 파이프라인 사용")
+            spec = fetch_confluence_page(raw)
+            if not spec:
+                print(f"  [건너뜀] 기획서 페이지를 가져오지 못했습니다: {raw}")
+                ws_input.update_cell(row_idx, 2, "오류: 기획서 조회 실패")
                 ws_input.update_cell(row_idx, 3, timestamp)
-                break
-            raise
-        print(f"  TC 생성 중...")
-        tc_list = generate_test_cases(groq_client, issue, augmented_spec, spec_context)
-        tc_list = filter_tc_list(tc_list)
-        tc_list = dedupe_tc_list(tc_list)
-        tc_list = [normalize_tc_id(tc, i) for i, tc in enumerate(tc_list, start=1)]
-        print(f"  생성된 TC: {len(tc_list)}개")
-        for tc in tc_list:
-            print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
+                continue
 
-        # 티켓별 시트에 저장
-        create_ticket_sheet(sh, issue, tc_list, timestamp)
+            issue = build_pseudo_issue_from_spec(spec, slugify_spec_key(raw), raw)
+            print(f"  제목: {issue['summary']}")
+            spec_context = context
 
-        # 입력 시트 상태 업데이트 (AI 생성 완료 — 사람 검수 전까지는 확정 아님)
-        mark_row_review_pending(ws_input, row_idx, timestamp)
-        print(f"  상태 업데이트: 검수 대기")
+        else:
+            # ── 기존 Jira 티켓 경로
+            try:
+                issue_key = extract_issue_key(raw)
+            except ValueError as e:
+                print(f"  [건너뜀] {e}")
+                ws_input.update_cell(row_idx, 2, "오류: 유효하지 않은 티켓")
+                ws_input.update_cell(row_idx, 3, timestamp)
+                continue
 
-        processed.append({"key": issue["key"], "summary": issue["summary"], "tc_count": len(tc_list)})
+            try:
+                issue = fetch_issue(jira, issue_key)
+            except Exception as e:
+                print(f"  [건너뜀] Jira 조회 실패: {e}")
+                ws_input.update_cell(row_idx, 2, "오류: Jira 조회 실패")
+                ws_input.update_cell(row_idx, 3, timestamp)
+                continue
+
+            print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
+
+            # spec 파일 자동 탐색 또는 생성
+            spec_context = get_or_generate_spec(groq_client, issue, context)
+
+        result, hit_daily_limit = generate_and_save_tc(sh, ws_input, groq_client, issue, spec_context, row_idx, timestamp)
+        if hit_daily_limit:
+            break
+        if result:
+            processed.append(result)
 
     # 슬랙 알림
     if processed:
