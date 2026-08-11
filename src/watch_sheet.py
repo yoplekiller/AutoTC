@@ -543,7 +543,12 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
     }
     context_block = f"\n\n[기획서/서비스 컨텍스트]\n{context}" if context else ""
 
-    prompt = f"""다음 티켓에 대해 [{test_type}] 유형 TC를 정확히 {count}개 작성하세요.
+    prompt = f"""다음 티켓에 대해 [{test_type}] 유형 TC를 작성하세요.
+
+[목표 개수 — {count}개는 상한이 아니라 참고치입니다]
+이전 단계에서 이 유형에 배정된 목표는 {count}개입니다. 하지만 이 숫자를 억지로 채워야 하는 것은 아닙니다.
+요구사항에서 실제로 검증 가능한, 서로 다른 조건의 수만큼만 작성하세요. 그 수가 {count}개보다 적다면 적은 개수만 작성하고,
+개수를 채우기 위해 중복 케이스·추정 기능·임의의 예외/보안/UX 케이스를 만들지 마세요.
 
 [테스트 유형 설명]
 {type_guide.get(test_type, test_type)}
@@ -580,8 +585,7 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
    예: 요구사항 "SDK는 2.x를 사용해야 한다."
    잘못된 TC: "SDK가 1.x이면 오류 메시지가 출력된다."
    올바른 TC: "설치된 SDK가 2.x 계열인지 확인한다."
-
-- {count}개를 반드시 모두 작성할 것 — 개수 미달 시 불합격
+7. 목표 개수({count}개)를 채우기 위해 위 원칙(1~6)을 어기는 TC를 추가하지 않는다. 검증 가능한 조건이 목표보다 적으면 그만큼만 작성한다.
 
 JSON 배열만 출력하세요. 마크다운 없이.
 
@@ -610,8 +614,8 @@ JSON 배열만 출력하세요. 마크다운 없이.
                         "role": "system",
                         "content": (
                             "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
-                            "지정된 테스트 유형과 개수를 반드시 지켜서 TC를 작성합니다. "
-                            "중요도 높은 핵심 시나리오를 최대한 많이 포함하고, 사소한 엣지케이스는 최소화하세요. "
+                            "지정된 테스트 유형에 맞는 TC를 작성합니다. 목표 개수는 상한이 아니라 참고치이며, 실제로 검증 가능한 조건보다 많이 만들지 않습니다. "
+                            "중요도 높은 핵심 시나리오를 우선하고, 사소한 엣지케이스는 최소화하세요. "
                             "요구사항에 명시되어 있거나 합리적으로 검증 가능한 동작만 TC로 작성하고, 근거 없는 기능이나 화면을 지어내지 마세요. "
                             "테스트 단계는 UI 기준으로 원자적이고 명확하게 작성하세요. "
                             "테스트 수행자가 기능을 구현하거나 설정을 새로 만들거나 코드를 수정해야만 수행 가능한 절차는 TC로 작성하지 마세요. "
@@ -657,27 +661,11 @@ JSON 배열만 출력하세요. 마크다운 없이.
 
 
 def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
-    """기획서/스펙 복잡도를 분석해 테스트 유형별 적정 TC 수를 결정합니다."""
+    """기획서/스펙에서 실제로 검증 가능한 조건의 개수를 분석해 테스트 유형별 TC 수를 결정합니다."""
     import time
-    type_map = {
-        "Bug": "Bug", "버그": "Bug",
-        "Story": "Story", "스토리": "Story",
-        "Task": "Task", "작업": "Task",
-        "Epic": "Epic", "에픽": "Epic",
-    }
-    issue_type = type_map.get(issue["issue_type"], "Story")
-
-    minimums = {
-        "Bug":   {"기능": 4, "예외처리": 1, "경계값": 1, "회귀": 4},
-        "Story": {"기능": 5, "예외처리": 2, "경계값": 1, "회귀": 4, "보안": 1, "UI/UX": 2},
-        "Task":  {"기능": 4, "예외처리": 1, "경계값": 1, "회귀": 2},
-        "Epic":  {"기능": 7, "예외처리": 2, "경계값": 1, "회귀": 5, "보안": 2, "UI/UX": 2},
-    }.get(issue_type, {"기능": 4, "예외처리": 1, "경계값": 1, "회귀": 3})
-
-    min_desc = "\n".join([f"  - {t}: 최소 {n}개" for t, n in minimums.items()])
     context_block = f"\n\n[기획서/스펙]\n{context}" if context else ""
 
-    prompt = f"""다음 티켓과 기획서를 분석해서 테스트 유형별로 몇 개의 TC가 필요한지 결정하세요.
+    prompt = f"""다음 티켓과 기획서를 분석해서, 테스트 유형별로 실제 요구사항에서 검증 가능한 조건이 몇 개인지 세어 TC 개수를 결정하세요.
 
 [티켓]
 유형: {issue['issue_type']} | 제목: {issue['summary']}
@@ -685,24 +673,20 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 [추론된 요구사항]
 {augmented_spec}{context_block}
 
-[최솟값 — 반드시 지킬 것]
-{min_desc}
-
-판단 기준:
-- 핵심 사용자 여정(가입/주문/결제/저장/제출)과 직접 연관된 기능/회귀를 우선 증가
-- 화면/입력 필드가 많아도 경계값은 핵심 필드 위주로만 선별
-- 정책/비즈니스 룰이 복잡할수록 기능/회귀를 우선 증가
-- 연관 기능이 많을수록 회귀 증가
-- 보안·권한 처리가 있으면 보안 포함
-- 전체 개수 중 예외처리+경계값 비중은 과반을 넘기지 말 것
+[판단 기준 — 정해진 최소 개수는 없습니다]
+- 기능/예외처리/경계값/회귀/보안/UI/UX 각 유형에 대해, 요구사항에 실제로 근거가 있거나 요구사항으로부터 합리적으로 검증 가능한 조건의 수만큼만 배정할 것
+- 핵심 사용자 여정(가입/주문/결제/저장/제출)과 직접 연관된 기능/회귀를 우선하고, 사소한 엣지케이스는 최소화할 것
+- 화면/입력 필드가 많아도 경계값은 핵심 필드 위주로만 선별할 것
+- 요구사항에 근거가 부족한 유형은 억지로 채우지 말고 0으로 둘 것 — 개수를 채우기 위한 중복 케이스, 추정 기능, 임의의 예외/보안/UX 케이스는 절대 만들지 말 것
 - 개발환경/빌드/설정(예: 프로젝트 생성, 빌드 성공 여부, 환경변수·설정값 지정)에 관한 요구사항도 정상적으로 TC 개수에 포함할 것 — 다만 이런 TC는 설정 파일을 만드는 절차가 아니라 "설정값이 적용됐는지, 명령 실행이 성공하는지"를 확인하는 검증 관점으로 작성될 것이므로, 배정할 유형은 UI 조작이 필요 없는 기능/회귀 위주로 판단할 것
 - 기능/예외처리/회귀 등 테스트 유형이 다르다는 이유만으로 동일한 검증 목적의 TC를 중복 배정하지 말 것 — 유형이 다르더라도 실질적으로 같은 검증 목적이면 하나의 유형에만 배정할 것
 
 아래 JSON 형식으로만 응답하세요. 마크다운 없이.
 {{"기능": 숫자, "예외처리": 숫자, "경계값": 숫자, "회귀": 숫자, "보안": 숫자, "UI/UX": 숫자}}
 
-보안/UI/UX가 불필요하면 0으로 설정하세요."""
+해당 유형에 검증 가능한 조건이 없으면 0으로 설정하세요."""
 
+    response = None
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
@@ -712,9 +696,9 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
                         "role": "system",
                         "content": (
                             "당신은 경력 10년차 시니어 QA 엔지니어입니다. "
-                            "기획서 복잡도를 분석해 테스트 유형별 적정 TC 수를 판단합니다. "
-                            "중요도 높은 핵심 흐름 검증(기능/회귀)을 충분히 확보하고 엣지케이스 비중은 낮추세요. "
-                            "과도하게 적거나 많지 않게, 실무 기준으로 판단하세요. "
+                            "기획서에서 실제로 검증 가능한 조건의 수를 세어 테스트 유형별 TC 수를 판단합니다. "
+                            "정해진 최소/목표 개수는 없습니다 — 중요도 높은 핵심 흐름 검증(기능/회귀)을 우선하고, "
+                            "요구사항에 근거가 부족한 유형은 억지로 채우지 말고 0으로 두세요. 개수를 채우기 위해 부풀리지 마세요. "
                             "환경/빌드/설정 요구사항도 검증 관점 TC로 정상 포함하세요(설정값·실행 결과 확인, UI 절차 아님). "
                             "동일한 검증 목적의 TC를 테스트 유형만 바꿔 중복 배정하지 마세요. "
                             "JSON만 출력하세요."
@@ -736,9 +720,12 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
             else:
                 raise
 
+    # Groq 호출 자체가 실패했을 때만 쓰는 최후의 degrade 값 — 정상 경로의 목표치가 아니다.
+    fallback = [("기능", 5), ("예외처리", 4), ("경계값", 3), ("회귀", 4)]
+
     if response is None:
         print("  [오류] 플랜 분석 Rate Limit 재시도 소진 — 기본값 사용")
-        return [(t, n) for t, n in minimums.items()]
+        return fallback
 
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -746,17 +733,11 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
 
     try:
         plan_dict = json.loads(raw)
-        plan = []
-        for t, min_n in minimums.items():
-            n = max(int(plan_dict.get(t, min_n)), min_n)
-            plan.append((t, n))
-        for t, n in plan_dict.items():
-            if t not in minimums and int(n) > 0:
-                plan.append((t, int(n)))
-        return plan
+        plan = [(t, int(n)) for t, n in plan_dict.items() if int(n) > 0]
+        return plan if plan else fallback
     except (json.JSONDecodeError, ValueError):
         print("  [경고] 플랜 분석 실패 — 기본값 사용")
-        return [(t, n) for t, n in minimums.items()]
+        return fallback
 
 
 def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:
