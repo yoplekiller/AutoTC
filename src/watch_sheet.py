@@ -3,10 +3,16 @@
 
 [동작 방식]
 1. 구글 시트 '티켓 입력' 탭의 A열(URL/키)을 스캔
-2. C열(상태)이 비어있는 행을 '미처리'로 인식
-3. Groq AI로 TC 생성 후 티켓/기획서별 시트에 저장
-4. C열 → '완료', D열 → 처리 시각으로 업데이트
-5. Slack 알림 발송
+2. C열(상태)이 비어있거나 "TC 생성"인 행을 '미처리'로 인식
+3. 기획서 URL 행은 먼저 QA Analysis(정책 불명확성 분석)를 수행:
+   - 불명확한 정책이 없으면 → 기존처럼 바로 TC 생성
+   - 있으면 → TC 생성을 보류하고 'QA Review' 탭에 확인 질문을 남긴 뒤 상태를
+     "QA 확인 필요 (N건)"로 표시. 사람이 QA Review 탭에 답변을 채운 뒤 '티켓 입력'
+     시트의 상태를 "TC 생성"으로 직접 바꾸면, 다음 폴링에서 원본 기획서 + 확정 답변을
+     합쳐 TC를 생성한다(2차 실행). Jira 티켓 행은 이 게이트 없이 기존과 동일하게 처리.
+4. Groq AI로 TC 생성 후 티켓/기획서별 시트에 저장
+5. C열 → '생성 완료', D열 → 처리 시각으로 업데이트
+6. Slack 알림 발송
 
 [시트 구조 - '티켓 입력' 탭]
   A열: 티켓 URL/이슈 키(예: MKQA-1, Jira URL) 또는 기획서 Confluence 페이지 URL
@@ -15,12 +21,22 @@
   B열: 기획서 제목(선택) — A열이 기획서 URL일 때만 의미 있음. 값을 넣으면 Confluence에서
        자동 추출한 제목(본문 첫 줄) 대신 이 제목을 그대로 사용(결과 시트 탭 이름/헤더에 표시됨).
        비워두면 기존처럼 자동 추출. Jira 티켓 행에서는 무시됨.
-  C열: 상태 (비워두면 대기 → 완료로 자동 업데이트)
+  C열: 상태 — 아래 값 중 하나
+       (빈 값) 대기 / "생성 완료" / "QA 확인 필요 (N건)" / "TC 생성"(2차 실행 트리거,
+       사용자가 직접 입력) / "오류: ..." 계열
   D열: 처리 시각 (자동 기입)
 
   기존에 A/상태/처리시각 3열 스키마로 쓰던 시트는 처음 실행될 때 B열에 "기획서 제목" 컬럼을
   자동으로 끼워넣는 1회성 마이그레이션이 실행된다(기존 데이터·기존 뒤쪽 컬럼은 오른쪽으로 밀리기만
   하고 값은 그대로 보존됨).
+
+[시트 구조 - 'QA Review' 탭 (공용, 기획서 URL 경로에서 정책 불명확성이 발견됐을 때만 생성/사용)]
+  A열: 기획서 키(= '티켓 입력' 행에서 만들어진 issue key, 여러 기획서의 질문이 한 탭에 섞이므로 구분용)
+  B열: Question ID (Q-001, Q-002, ...)
+  C열: 관련 요구사항/컨텍스트
+  D열: 확인 필요 사항 (AI가 생성한 질문)
+  E열: 답변 (사람이 직접 입력)
+  F열: 상태 ("미확정" / "답변완료" — 답변 입력 후 다음 폴링에서 자동으로 갱신됨)
 
 [실행]
   python src/watch_sheet.py
@@ -58,6 +74,10 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
 INPUT_SHEET_NAME = "티켓 입력"
 OUTPUT_SHEET_NAME = "매뉴얼 TC"  # 사용 안 함 (티켓별 시트로 분리)
+QA_REVIEW_SHEET_NAME = "QA Review"
+QA_REVIEW_HEADERS = ["기획서 키", "Question ID", "관련 요구사항", "확인 필요 사항", "답변", "상태"]
+# '티켓 입력' 상태를 이 값으로 직접 바꾸면 QA Review 답변을 반영한 2차 TC 생성이 트리거된다.
+RETRY_TRIGGER_STATUS = "TC 생성"
 
 
 # ── gspread 클라이언트 ────────────────────────────────────────────────
@@ -103,8 +123,10 @@ def get_or_create_worksheet(sh, title: str, rows=1000, cols=10):
 
 def scan_pending_rows(ws_input) -> list:
     """
-    '티켓 입력' 시트에서 C열(상태)이 비어있는 행을 반환.
-    반환: [{"row_idx": 2, "raw_value": "MKQA-1", "title": ""}, ...]
+    '티켓 입력' 시트에서 C열(상태)이 비어있거나 RETRY_TRIGGER_STATUS("TC 생성")인 행을 반환.
+    후자는 QA Review 답변을 확정하고 2차 TC 생성을 요청한 행이다 — status 값을 같이 돌려줘서
+    호출부가 1차/2차 실행을 구분할 수 있게 한다.
+    반환: [{"row_idx": 2, "raw_value": "MKQA-1", "title": "", "status": ""}, ...]
     """
     all_values = ws_input.get_all_values()  # 전체 행 리스트
 
@@ -115,8 +137,8 @@ def scan_pending_rows(ws_input) -> list:
         a_val = row[0].strip() if len(row) > 0 else ""
         b_val = row[1].strip() if len(row) > 1 else ""  # 기획서 제목(선택)
         c_val = row[2].strip() if len(row) > 2 else ""  # 상태
-        if a_val and not c_val:
-            pending.append({"row_idx": i + 1, "raw_value": a_val, "title": b_val})  # 1-based
+        if a_val and (not c_val or c_val == RETRY_TRIGGER_STATUS):
+            pending.append({"row_idx": i + 1, "raw_value": a_val, "title": b_val, "status": c_val})  # 1-based
 
     return pending
 
@@ -907,6 +929,159 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     print(f"  '{sheet_title}' 시트에 TC {len(tc_list)}개 저장 완료")
 
 
+# ── QA Analysis (정책 불명확성 분석) ───────────────────────────────────
+
+def run_qa_analysis(groq_client: Groq, issue: dict, context: str = "") -> dict:
+    """기획서를 분석해서, 테스트 케이스의 정확한 기대 결과를 결정하는 데 필요한데
+    기획서에 명시되지 않은 정책을 찾아낸다. AI가 빠진 정책을 스스로 확정하지 않고
+    (예: "31일인데 2월이면 말일 처리"처럼 그럴듯한 기본값이라도 근거가 없으면 확정 금지),
+    전부 질문 형태로만 남긴다. 문서 스타일/오탈자 같은 사소한 문제는 다루지 않는다.
+
+    반환: {"questions": [{"id": "Q-001", "context": "...", "question": "..."}]}
+    빈 리스트면 불명확한 정책이 없다는 뜻 — 호출부는 바로 TC 생성으로 진행하면 된다.
+    """
+    import time
+    context_block = f"\n\n[서비스 컨텍스트]\n{context}" if context else ""
+
+    prompt = f"""다음 기획서를 분석하세요.
+
+[티켓 유형] {issue['issue_type']} | [제목] {issue['summary']}
+
+[기획서 원문]
+{issue['description']}{context_block}
+
+기획서에 실제로 명시된 요구사항과, 명시돼 있지 않아 정책이 불명확한 부분을 구분하세요.
+
+[불명확 판단 기준]
+- 경계값/상태전이 등 테스트 케이스의 정확한 기대 결과를 결정해야 하는데, 기획서에 처리 규칙이 없으면 불명확으로 분류하세요.
+- 기획서에 없는 처리 방식을 스스로 확정하지 마세요. 합리적으로 보이는 기본값이라도 기획서에 근거가 없으면 확정하지 말고 질문으로 남기세요.
+- 문서 스타일, 오탈자, 사소한 표현 문제는 다루지 마세요 — 테스트 가능한 정책/동작 규칙의 공백만 다루세요.
+- 이미 기획서에 명시된 내용은 다시 질문으로 만들지 마세요.
+
+아래 JSON 형식으로만 응답하세요. 마크다운 없이.
+{{"questions": [{{"id": "Q-001", "context": "관련 요구사항 요약", "question": "확인이 필요한 질문"}}]}}
+
+불명확한 정책이 전혀 없으면 questions를 빈 배열로 응답하세요."""
+
+    response = None
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 시니어 QA 엔지니어입니다. 기획서를 분석해서, 테스트 케이스의 "
+                            "정확한 기대 결과를 결정하는 정책 중 기획서에 명시되지 않은 부분을 찾아냅니다. "
+                            "기획서에 없는 정책을 스스로 확정하지 않고, 반드시 질문 형태로만 남깁니다. "
+                            "사소한 문서 스타일 문제는 다루지 않고, 실제로 테스트 가능한 정책 공백만 다룹니다. "
+                            "JSON만 출력하세요."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=1500,
+            )
+            break
+        except Exception as e:
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
+            if "rate_limit" in e_str or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"    [Rate Limit/분당] QA Analysis {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
+
+    if response is None:
+        print("  [오류] QA Analysis Rate Limit 재시도 소진 — 불명확 없음으로 간주하고 진행")
+        return {"questions": []}
+
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        result = json.loads(raw)
+        return {"questions": result.get("questions", [])}
+    except json.JSONDecodeError:
+        print(f"  [경고] QA Analysis 파싱 실패 (응답: {raw[:150]}) — 불명확 없음으로 간주하고 진행")
+        return {"questions": []}
+
+
+def get_or_create_qa_review_sheet(sh):
+    """'QA Review' 탭을 확보한다(공용 — 여러 기획서의 질문이 기획서 키로 구분돼 한 탭에 모임)."""
+    ws = get_or_create_worksheet(sh, QA_REVIEW_SHEET_NAME, rows=500, cols=len(QA_REVIEW_HEADERS))
+    first_row = ws.row_values(1)
+    if not first_row or first_row[0] != QA_REVIEW_HEADERS[0]:
+        ws.update([QA_REVIEW_HEADERS], "A1")
+        ws.format(f"A1:{chr(64 + len(QA_REVIEW_HEADERS))}1", {
+            "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "horizontalAlignment": "CENTER",
+        })
+    return ws
+
+
+def append_qa_questions(ws_qa, spec_key: str, questions: list):
+    """QA Analysis가 찾아낸 질문들을 QA Review 탭에 추가한다. 같은 (기획서 키, Question ID)가
+    이미 있으면 건너뛴다(재실행으로 인한 중복 방지)."""
+    existing = ws_qa.get_all_values()
+    existing_ids = {(row[0].strip(), row[1].strip()) for row in existing[1:] if len(row) > 1}
+    rows_to_add = [
+        [spec_key, q["id"], q.get("context", ""), q["question"], "", "미확정"]
+        for q in questions
+        if (spec_key, q["id"]) not in existing_ids
+    ]
+    if rows_to_add:
+        ws_qa.append_rows(rows_to_add, value_input_option="RAW")
+
+
+def read_qa_answers(ws_qa, spec_key: str) -> tuple:
+    """QA Review 탭에서 이 기획서 키에 해당하는 질문/답변 행을 전부 읽는다.
+    답변이 새로 채워진 행은 상태를 "답변완료"로 갱신한다.
+    반환: (행 목록, 모든 질문에 답변이 채워졌는지 여부)
+    """
+    all_values = ws_qa.get_all_values()
+    rows = []
+    status_updates = []
+    for i, row in enumerate(all_values):
+        if i == 0 or len(row) < 1 or row[0].strip() != spec_key:
+            continue
+        answer = row[4].strip() if len(row) > 4 else ""
+        status = row[5].strip() if len(row) > 5 else ""
+        if answer and status != "답변완료":
+            status_updates.append((i + 1, "답변완료"))
+            status = "답변완료"
+        rows.append({
+            "row_idx": i + 1,
+            "id": row[1].strip() if len(row) > 1 else "",
+            "context": row[2].strip() if len(row) > 2 else "",
+            "question": row[3].strip() if len(row) > 3 else "",
+            "answer": answer,
+            "status": status,
+        })
+
+    for row_idx, status in status_updates:
+        ws_qa.update_cell(row_idx, 6, status)
+
+    all_answered = bool(rows) and all(r["answer"] for r in rows)
+    return rows, all_answered
+
+
+def build_confirmed_spec(spec: str, qa_rows: list) -> str:
+    """원본 기획서 + QA Review에서 사람이 확정한 답변을 하나의 텍스트로 합친다.
+    사람의 답변은 원본 요구사항을 보완하는 확정 정책으로 취급되어, 기존
+    augment_ticket_spec/generate_test_cases 파이프라인에 issue["description"]로 그대로 흘러간다
+    (TC 생성 프롬프트 자체는 손대지 않는다)."""
+    answered = [q for q in qa_rows if q["answer"]]
+    if not answered:
+        return spec
+    answers_block = "\n".join(f"- {q['question']}\n  → 확정: {q['answer']}" for q in answered)
+    return f"{spec}\n\n[QA 검토에서 확정된 추가 정책]\n{answers_block}"
+
+
 def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, row_idx: int, timestamp: str):
     """요구사항 추론 → TC 생성 → 필터/중복제거 → 시트 저장 → 입력행 상태 업데이트.
 
@@ -960,17 +1135,29 @@ def mark_row_review_pending(ws_input, row_idx: int, timestamp: str):
 
 # ── Slack 알림 ────────────────────────────────────────────────────────
 
-def notify_slack(processed: list, sheet_id: str):
-    """처리 완료된 티켓 목록을 Slack으로 알림."""
+def notify_slack(processed: list, sheet_id: str, needs_qa: list = None):
+    """처리 완료된 티켓 목록 + QA 확인이 필요해진 기획서 목록을 Slack으로 알림."""
     if not SLACK_WEBHOOK_URL:
+        return
+    needs_qa = needs_qa or []
+    if not processed and not needs_qa:
         return
 
     sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-    lines = [f"*[TC 자동 생성 완료 — 검수 요청]* {len(processed)}개 티켓 처리됨"]
-    for item in processed:
-        tc_count = item["tc_count"]
-        lines.append(f"  • `{item['key']}` {item['summary']} — TC {tc_count}개 (검수 대기)")
-    lines.append("\n⚠️ AI가 생성한 초안입니다. QA 담당자 검수·보완 후 사용해주세요.")
+    lines = []
+    if processed:
+        lines.append(f"*[TC 자동 생성 완료 — 검수 요청]* {len(processed)}개 티켓 처리됨")
+        for item in processed:
+            lines.append(f"  • `{item['key']}` {item['summary']} — TC {item['tc_count']}개 (검수 대기)")
+    if needs_qa:
+        lines.append(f"\n*[QA 확인 필요]* {len(needs_qa)}건")
+        for item in needs_qa:
+            lines.append(
+                f"  • `{item['key']}` {item['summary']} — 미답변 질문 {item['question_count']}건. "
+                f"'QA Review' 탭에서 답변 후 '티켓 입력' 상태를 '{RETRY_TRIGGER_STATUS}'로 바꿔주세요."
+            )
+    if processed:
+        lines.append("\n⚠️ AI가 생성한 초안입니다. QA 담당자 검수·보완 후 사용해주세요.")
     lines.append(f"<{sheet_url}|구글 시트에서 확인>")
 
     payload = {"text": "\n".join(lines)}
@@ -1055,17 +1242,20 @@ def main():
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
     processed = []
+    needs_qa = []
+    ws_qa = None  # 첫 QA Analysis가 필요해질 때 지연 생성(불필요한 API 호출 방지)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for item in pending:
         raw = item["raw_value"]
         row_idx = item["row_idx"]
         title = item.get("title", "")  # B열: 기획서 제목(선택), Jira 티켓 행에서는 항상 빈 문자열
+        is_retry = item.get("status", "") == RETRY_TRIGGER_STATUS
 
-        print(f"\n처리 중: {raw} (행 {row_idx})")
+        print(f"\n처리 중: {raw} (행 {row_idx})" + (" [2차: QA 검토 완료]" if is_retry else ""))
 
         if is_confluence_spec_url(raw):
-            # ── 기획서(Confluence 페이지) URL 직접 입력 경로 — Jira 티켓 없이 바로 TC 생성
+            # ── 기획서(Confluence 페이지) URL 직접 입력 경로
             print("  기획서(Confluence) URL로 인식 — 기획서 기반 파이프라인 사용")
             spec = fetch_confluence_page(raw)
             if not spec:
@@ -1075,13 +1265,52 @@ def main():
                 continue
 
             key_source = title or raw
-            issue = build_pseudo_issue_from_spec(spec, slugify_spec_key(key_source), raw)
+            spec_key = slugify_spec_key(key_source)
+            issue = build_pseudo_issue_from_spec(spec, spec_key, raw)
             if title:
                 # B열에 사람이 직접 적은 제목이 있으면, Confluence 본문 첫 줄 추출보다 우선한다
                 # (본문 구조가 지저분하면 첫 줄이 실제 제목과 다를 수 있어서).
                 issue["summary"] = title
             print(f"  제목: {issue['summary']}")
             spec_context = context
+
+            if is_retry:
+                # ── 2차 실행: QA Review 답변이 다 채워졌는지 확인 후, 원본 기획서 + 확정 답변으로 진행
+                if ws_qa is None:
+                    ws_qa = get_or_create_qa_review_sheet(sh)
+                qa_rows, all_answered = read_qa_answers(ws_qa, spec_key)
+                if qa_rows and not all_answered:
+                    unanswered = sum(1 for q in qa_rows if not q["answer"])
+                    print(f"  [보류] QA Review 미답변 질문 {unanswered}건 남음 — TC 생성 보류")
+                    ws_input.update_cell(row_idx, 3, f"QA 확인 필요 ({unanswered}건)")
+                    ws_input.update_cell(row_idx, 4, timestamp)
+                    needs_qa.append({"key": issue["key"], "summary": issue["summary"], "question_count": unanswered})
+                    continue
+                if qa_rows:
+                    print(f"  QA Review 답변 {len(qa_rows)}건 전부 확인 — 원본 기획서에 반영")
+                    issue["description"] = build_confirmed_spec(spec, qa_rows)
+                # qa_rows가 비어있으면(질문 자체가 없었던 행) 원본 기획서 그대로 진행
+            else:
+                # ── 1차 실행: QA Analysis로 정책 불명확성 먼저 확인
+                print("  QA Analysis 수행 중...")
+                try:
+                    qa_result = run_qa_analysis(groq_client, issue, spec_context)
+                except DailyTokenLimitError:
+                    print(f"  [일일 한도 초과] Groq 일일 토큰 소진 — 이후 항목 처리 중단")
+                    ws_input.update_cell(row_idx, 3, "오류: 일일 토큰 한도 초과")
+                    ws_input.update_cell(row_idx, 4, timestamp)
+                    break
+                questions = qa_result["questions"]
+                if questions:
+                    print(f"  QA 확인 필요 질문 {len(questions)}건 발견 — TC 생성 보류")
+                    if ws_qa is None:
+                        ws_qa = get_or_create_qa_review_sheet(sh)
+                    append_qa_questions(ws_qa, spec_key, questions)
+                    ws_input.update_cell(row_idx, 3, f"QA 확인 필요 ({len(questions)}건)")
+                    ws_input.update_cell(row_idx, 4, timestamp)
+                    needs_qa.append({"key": issue["key"], "summary": issue["summary"], "question_count": len(questions)})
+                    continue
+                print("  불명확한 정책 없음 — 바로 TC 생성 진행")
 
         else:
             # ── 기존 Jira 티켓 경로
@@ -1113,10 +1342,12 @@ def main():
             processed.append(result)
 
     # 슬랙 알림
-    if processed:
-        notify_slack(processed, sheet_id)
+    notify_slack(processed, sheet_id, needs_qa)
 
-    print(f"\n=== 완료: {len(processed)}개 티켓 처리 / {sum(p['tc_count'] for p in processed)}개 TC 생성 ===")
+    print(
+        f"\n=== 완료: {len(processed)}개 티켓 처리 / {sum(p['tc_count'] for p in processed)}개 TC 생성"
+        f" / QA 확인 필요 {len(needs_qa)}건 ==="
+    )
 
 
 if __name__ == "__main__":
