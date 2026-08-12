@@ -1229,6 +1229,29 @@ def main():
         ws_input.format("A1:D1", header_format)
         print(f"  '{INPUT_SHEET_NAME}' 기존 3열 스키마 감지 → B열에 '기획서 제목' 컬럼 삽입 (마이그레이션 완료)")
 
+    # C열(상태) 드롭다운: RETRY_TRIGGER_STATUS를 직접 타이핑하다 오타 나면 2차 실행이
+    # 영원히 트리거 안 되는 문제를 막는다. strict=False라 스크립트가 쓰는 다른 상태값
+    # (생성 완료/QA 확인 필요 (N건)/오류: ... 등)은 그대로 자유롭게 쓸 수 있다.
+    sh.batch_update({"requests": [{
+        "setDataValidation": {
+            "range": {
+                "sheetId": ws_input.id,
+                "startRowIndex": 1,
+                "endRowIndex": ws_input.row_count,
+                "startColumnIndex": 2,
+                "endColumnIndex": 3,
+            },
+            "rule": {
+                "condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": RETRY_TRIGGER_STATUS}],
+                },
+                "showCustomUi": True,
+                "strict": False,
+            },
+        }
+    }]})
+
     # 미처리 행 스캔
     pending = scan_pending_rows(ws_input)
 
