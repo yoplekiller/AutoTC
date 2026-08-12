@@ -1004,7 +1004,11 @@ def run_qa_analysis(groq_client: Groq, issue: dict, context: str = "") -> dict:
     raw = re.sub(r"\s*```$", "", raw)
     try:
         result = json.loads(raw)
-        return {"questions": result.get("questions", [])}
+        questions = result.get("questions", [])
+        for q in questions:
+            q["context"] = _sanitize_text(q.get("context", ""))
+            q["question"] = _sanitize_text(q.get("question", ""))
+        return {"questions": questions}
     except json.JSONDecodeError:
         print(f"  [경고] QA Analysis 파싱 실패 (응답: {raw[:150]}) — 불명확 없음으로 간주하고 진행")
         return {"questions": []}
