@@ -3,14 +3,16 @@
 
 [동작 방식]
 1. 구글 시트 '티켓 입력' 탭의 A열(URL/키)을 스캔
-2. C열(상태)이 비어있거나 "TC 생성"인 행을 '미처리'로 인식
+2. C열(상태)이 "생성 시작" 또는 "TC 생성"인 행만 '미처리'로 인식 — 비어있는 행(URL/제목을
+   아직 작성 중인 초안)은 처리하지 않는다. 드롭다운에서 명시적으로 선택해야 다음 폴링에서
+   처리가 시작된다(Jira 티켓 행/기획서 URL 행 모두 동일).
 3. 기획서 URL 행은 먼저 QA Analysis(정책 불명확성 분석)를 수행:
    - 불명확한 정책이 없으면 → 기존처럼 바로 TC 생성
-   - 있으면 → TC 생성을 보류하고 'QA Review' 탭에 확인 질문을 남긴 뒤 상태를
-     "QA 확인 필요 (N건)"로 표시. 사람이 QA Review 탭에 답변을 채운 뒤 '티켓 입력'
+   - 있으면 → TC 생성을 보류하고 이 기획서 전용 "{제목} QA Review" 탭에 확인 질문을
+     남긴 뒤 상태를 "QA 확인 필요 (N건)"로 표시. 사람이 그 탭에 답변을 채운 뒤 '티켓 입력'
      시트의 상태를 "TC 생성"으로 직접 바꾸면, 다음 폴링에서 원본 기획서 + 확정 답변을
      합쳐 TC를 생성한다(2차 실행). Jira 티켓 행은 이 게이트 없이 기존과 동일하게 처리.
-4. Groq AI로 TC 생성 후 티켓/기획서별 시트에 저장
+4. Groq AI로 TC 생성 후 "{제목}" 시트에 저장
 5. C열 → '생성 완료', D열 → 처리 시각으로 업데이트
 6. Slack 알림 발송
 
@@ -22,21 +24,21 @@
        자동 추출한 제목(본문 첫 줄) 대신 이 제목을 그대로 사용(결과 시트 탭 이름/헤더에 표시됨).
        비워두면 기존처럼 자동 추출. Jira 티켓 행에서는 무시됨.
   C열: 상태 — 아래 값 중 하나
-       (빈 값) 대기 / "생성 완료" / "QA 확인 필요 (N건)" / "TC 생성"(2차 실행 트리거,
-       사용자가 직접 입력) / "오류: ..." 계열
+       (빈 값) 작성 중, 아직 처리 안 함 / "생성 시작"(드롭다운, 1차 실행 트리거) / "생성 완료"
+       / "QA 확인 필요 (N건)" / "TC 생성"(드롭다운, 2차 실행 트리거) / "오류: ..." 계열
   D열: 처리 시각 (자동 기입)
 
   기존에 A/상태/처리시각 3열 스키마로 쓰던 시트는 처음 실행될 때 B열에 "기획서 제목" 컬럼을
   자동으로 끼워넣는 1회성 마이그레이션이 실행된다(기존 데이터·기존 뒤쪽 컬럼은 오른쪽으로 밀리기만
   하고 값은 그대로 보존됨).
 
-[시트 구조 - 'QA Review' 탭 (공용, 기획서 URL 경로에서 정책 불명확성이 발견됐을 때만 생성/사용)]
-  A열: 기획서 키(= '티켓 입력' 행에서 만들어진 issue key, 여러 기획서의 질문이 한 탭에 섞이므로 구분용)
-  B열: Question ID (Q-001, Q-002, ...)
-  C열: 관련 요구사항/컨텍스트
-  D열: 확인 필요 사항 (AI가 생성한 질문)
-  E열: 답변 (사람이 직접 입력)
-  F열: 상태 ("미확정" / "답변완료" — 답변 입력 후 다음 폴링에서 자동으로 갱신됨)
+[시트 구조 - "{기획서/티켓 제목} QA Review" 탭 (해당 기획서에서 정책 불명확성이 발견됐을 때만
+  생성됨 — TC 결과 시트("{제목}")와 마찬가지로 기획서/티켓 하나당 하나씩 생긴다)]
+  A열: Question ID (Q-001, Q-002, ...)
+  B열: 관련 요구사항/컨텍스트
+  C열: 확인 필요 사항 (AI가 생성한 질문)
+  D열: 답변 (사람이 직접 입력)
+  E열: 상태 ("미확정" / "답변완료" — 답변 입력 후 다음 폴링에서 자동으로 갱신됨)
 
 [실행]
   python src/watch_sheet.py
@@ -74,8 +76,11 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
 INPUT_SHEET_NAME = "티켓 입력"
 OUTPUT_SHEET_NAME = "매뉴얼 TC"  # 사용 안 함 (티켓별 시트로 분리)
-QA_REVIEW_SHEET_NAME = "QA Review"
-QA_REVIEW_HEADERS = ["기획서 키", "Question ID", "관련 요구사항", "확인 필요 사항", "답변", "상태"]
+QA_REVIEW_SHEET_SUFFIX = " QA Review"  # 기획서/티켓 제목 + 이 접미사로 전용 탭을 만든다 (TC 결과 시트와 동일한 명명 규칙)
+QA_REVIEW_HEADERS = ["Question ID", "관련 요구사항", "확인 필요 사항", "답변", "상태"]
+# '티켓 입력' 상태를 이 값으로 바꾸면(드롭다운 선택) 다음 폴링에서 처리를 시작한다 — 상태가
+# 비어있는 행(작성 중인 초안)은 자동 처리되지 않는다.
+GENERATE_TRIGGER_STATUS = "생성 시작"
 # '티켓 입력' 상태를 이 값으로 직접 바꾸면 QA Review 답변을 반영한 2차 TC 생성이 트리거된다.
 RETRY_TRIGGER_STATUS = "TC 생성"
 
@@ -123,10 +128,12 @@ def get_or_create_worksheet(sh, title: str, rows=1000, cols=10):
 
 def scan_pending_rows(ws_input) -> list:
     """
-    '티켓 입력' 시트에서 C열(상태)이 비어있거나 RETRY_TRIGGER_STATUS("TC 생성")인 행을 반환.
-    후자는 QA Review 답변을 확정하고 2차 TC 생성을 요청한 행이다 — status 값을 같이 돌려줘서
-    호출부가 1차/2차 실행을 구분할 수 있게 한다.
-    반환: [{"row_idx": 2, "raw_value": "MKQA-1", "title": "", "status": ""}, ...]
+    '티켓 입력' 시트에서 C열(상태)이 GENERATE_TRIGGER_STATUS("생성 시작") 또는
+    RETRY_TRIGGER_STATUS("TC 생성")인 행을 반환. 상태가 비어있는 행(URL/제목을 아직
+    작성 중인 초안)은 처리하지 않는다 — 드롭다운에서 명시적으로 트리거를 선택해야 다음
+    폴링에서 처리가 시작된다. 후자는 QA Review 답변을 확정하고 2차 TC 생성을 요청한
+    행이다 — status 값을 같이 돌려줘서 호출부가 1차/2차 실행을 구분할 수 있게 한다.
+    반환: [{"row_idx": 2, "raw_value": "MKQA-1", "title": "", "status": "생성 시작"}, ...]
     """
     all_values = ws_input.get_all_values()  # 전체 행 리스트
 
@@ -137,7 +144,7 @@ def scan_pending_rows(ws_input) -> list:
         a_val = row[0].strip() if len(row) > 0 else ""
         b_val = row[1].strip() if len(row) > 1 else ""  # 기획서 제목(선택)
         c_val = row[2].strip() if len(row) > 2 else ""  # 상태
-        if a_val and (not c_val or c_val == RETRY_TRIGGER_STATUS):
+        if a_val and c_val in (GENERATE_TRIGGER_STATUS, RETRY_TRIGGER_STATUS):
             pending.append({"row_idx": i + 1, "raw_value": a_val, "title": b_val, "status": c_val})  # 1-based
 
     return pending
@@ -1014,9 +1021,17 @@ def run_qa_analysis(groq_client: Groq, issue: dict, context: str = "") -> dict:
         return {"questions": []}
 
 
-def get_or_create_qa_review_sheet(sh):
-    """'QA Review' 탭을 확보한다(공용 — 여러 기획서의 질문이 기획서 키로 구분돼 한 탭에 모임)."""
-    ws = get_or_create_worksheet(sh, QA_REVIEW_SHEET_NAME, rows=500, cols=len(QA_REVIEW_HEADERS))
+def qa_review_sheet_title(issue: dict) -> str:
+    """기획서/티켓 제목 기반 QA Review 탭 이름을 만든다. 구글시트 탭 이름 100자 제한을
+    지키기 위해 접미사(" QA Review")가 들어갈 자리를 남기고 제목을 자른다."""
+    max_title_len = 100 - len(QA_REVIEW_SHEET_SUFFIX)
+    return issue["summary"][:max_title_len] + QA_REVIEW_SHEET_SUFFIX
+
+
+def get_or_create_qa_review_sheet(sh, issue: dict):
+    """이 기획서/티켓 전용 QA Review 탭을 확보한다 — `create_ticket_sheet`가 TC 결과 시트를
+    제목으로 만드는 것과 동일한 규칙으로, TC 시트 바로 옆에서 찾을 수 있게 한다."""
+    ws = get_or_create_worksheet(sh, qa_review_sheet_title(issue), rows=200, cols=len(QA_REVIEW_HEADERS))
     first_row = ws.row_values(1)
     if not first_row or first_row[0] != QA_REVIEW_HEADERS[0]:
         ws.update([QA_REVIEW_HEADERS], "A1")
@@ -1028,47 +1043,60 @@ def get_or_create_qa_review_sheet(sh):
     return ws
 
 
-def append_qa_questions(ws_qa, spec_key: str, questions: list):
-    """QA Analysis가 찾아낸 질문들을 QA Review 탭에 추가한다. 같은 (기획서 키, Question ID)가
-    이미 있으면 건너뛴다(재실행으로 인한 중복 방지)."""
+def append_qa_questions(ws_qa, questions: list):
+    """QA Analysis가 찾아낸 질문들을 이 기획서 전용 QA Review 탭에 추가한다. 같은 질문
+    본문이 이미 있으면 건너뛴다(재실행으로 인한 중복 방지).
+
+    dedup 키로 AI가 매긴 id(예: "Q-001")를 쓰지 않는다 — id는 매 호출마다 AI가 Q-001부터
+    새로 매기므로, 재분석하면 실제 질문 내용이 달라도 id가 우연히 겹쳐서 새 질문이 전부
+    걸러지는 버그가 있었다(같은 URL을 다시 넣으면 QA Review에 아무것도 추가되지 않던
+    증상의 원인). 질문 본문으로 dedup하고, 시트에 보일 ID는 이 탭 안에서 이어지는
+    순번으로 여기서 새로 매긴다."""
     existing = ws_qa.get_all_values()
-    existing_ids = {(row[0].strip(), row[1].strip()) for row in existing[1:] if len(row) > 1}
-    rows_to_add = [
-        [spec_key, q["id"], q.get("context", ""), q["question"], "", "미확정"]
-        for q in questions
-        if (spec_key, q["id"]) not in existing_ids
-    ]
+    existing_rows = existing[1:]
+    existing_questions = {row[2].strip() for row in existing_rows if len(row) > 2}
+    next_seq = len(existing_rows) + 1
+
+    rows_to_add = []
+    for q in questions:
+        question_text = q["question"].strip()
+        if question_text in existing_questions:
+            continue
+        rows_to_add.append([f"Q-{next_seq:03d}", q.get("context", ""), question_text, "", "미확정"])
+        existing_questions.add(question_text)
+        next_seq += 1
+
     if rows_to_add:
         ws_qa.append_rows(rows_to_add, value_input_option="RAW")
 
 
-def read_qa_answers(ws_qa, spec_key: str) -> tuple:
-    """QA Review 탭에서 이 기획서 키에 해당하는 질문/답변 행을 전부 읽는다.
-    답변이 새로 채워진 행은 상태를 "답변완료"로 갱신한다.
+def read_qa_answers(ws_qa) -> tuple:
+    """QA Review 탭의 질문/답변 행을 전부 읽는다(탭 자체가 이미 기획서 하나 전용이라
+    기획서 키로 다시 걸러낼 필요가 없다). 답변이 새로 채워진 행은 상태를 "답변완료"로 갱신한다.
     반환: (행 목록, 모든 질문에 답변이 채워졌는지 여부)
     """
     all_values = ws_qa.get_all_values()
     rows = []
     status_updates = []
     for i, row in enumerate(all_values):
-        if i == 0 or len(row) < 1 or row[0].strip() != spec_key:
+        if i == 0 or len(row) < 1:
             continue
-        answer = row[4].strip() if len(row) > 4 else ""
-        status = row[5].strip() if len(row) > 5 else ""
+        answer = row[3].strip() if len(row) > 3 else ""
+        status = row[4].strip() if len(row) > 4 else ""
         if answer and status != "답변완료":
             status_updates.append((i + 1, "답변완료"))
             status = "답변완료"
         rows.append({
             "row_idx": i + 1,
-            "id": row[1].strip() if len(row) > 1 else "",
-            "context": row[2].strip() if len(row) > 2 else "",
-            "question": row[3].strip() if len(row) > 3 else "",
+            "id": row[0].strip() if len(row) > 0 else "",
+            "context": row[1].strip() if len(row) > 1 else "",
+            "question": row[2].strip() if len(row) > 2 else "",
             "answer": answer,
             "status": status,
         })
 
     for row_idx, status in status_updates:
-        ws_qa.update_cell(row_idx, 6, status)
+        ws_qa.update_cell(row_idx, 5, status)
 
     all_answered = bool(rows) and all(r["answer"] for r in rows)
     return rows, all_answered
@@ -1229,9 +1257,9 @@ def main():
         ws_input.format("A1:D1", header_format)
         print(f"  '{INPUT_SHEET_NAME}' 기존 3열 스키마 감지 → B열에 '기획서 제목' 컬럼 삽입 (마이그레이션 완료)")
 
-    # C열(상태) 드롭다운: RETRY_TRIGGER_STATUS를 직접 타이핑하다 오타 나면 2차 실행이
-    # 영원히 트리거 안 되는 문제를 막는다. strict=False라 스크립트가 쓰는 다른 상태값
-    # (생성 완료/QA 확인 필요 (N건)/오류: ... 등)은 그대로 자유롭게 쓸 수 있다.
+    # C열(상태) 드롭다운: GENERATE_TRIGGER_STATUS/RETRY_TRIGGER_STATUS를 직접 타이핑하다
+    # 오타 나면 실행이 영원히 트리거 안 되는 문제를 막는다. strict=False라 스크립트가 쓰는
+    # 다른 상태값(생성 완료/QA 확인 필요 (N건)/오류: ... 등)은 그대로 자유롭게 쓸 수 있다.
     sh.batch_update({"requests": [{
         "setDataValidation": {
             "range": {
@@ -1244,7 +1272,10 @@ def main():
             "rule": {
                 "condition": {
                     "type": "ONE_OF_LIST",
-                    "values": [{"userEnteredValue": RETRY_TRIGGER_STATUS}],
+                    "values": [
+                        {"userEnteredValue": GENERATE_TRIGGER_STATUS},
+                        {"userEnteredValue": RETRY_TRIGGER_STATUS},
+                    ],
                 },
                 "showCustomUi": True,
                 "strict": False,
@@ -1270,7 +1301,6 @@ def main():
 
     processed = []
     needs_qa = []
-    ws_qa = None  # 첫 QA Analysis가 필요해질 때 지연 생성(불필요한 API 호출 방지)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for item in pending:
@@ -1303,9 +1333,8 @@ def main():
 
             if is_retry:
                 # ── 2차 실행: QA Review 답변이 다 채워졌는지 확인 후, 원본 기획서 + 확정 답변으로 진행
-                if ws_qa is None:
-                    ws_qa = get_or_create_qa_review_sheet(sh)
-                qa_rows, all_answered = read_qa_answers(ws_qa, spec_key)
+                ws_qa = get_or_create_qa_review_sheet(sh, issue)
+                qa_rows, all_answered = read_qa_answers(ws_qa)
                 if qa_rows and not all_answered:
                     unanswered = sum(1 for q in qa_rows if not q["answer"])
                     print(f"  [보류] QA Review 미답변 질문 {unanswered}건 남음 — TC 생성 보류")
@@ -1330,9 +1359,8 @@ def main():
                 questions = qa_result["questions"]
                 if questions:
                     print(f"  QA 확인 필요 질문 {len(questions)}건 발견 — TC 생성 보류")
-                    if ws_qa is None:
-                        ws_qa = get_or_create_qa_review_sheet(sh)
-                    append_qa_questions(ws_qa, spec_key, questions)
+                    ws_qa = get_or_create_qa_review_sheet(sh, issue)
+                    append_qa_questions(ws_qa, questions)
                     ws_input.update_cell(row_idx, 3, f"QA 확인 필요 ({len(questions)}건)")
                     ws_input.update_cell(row_idx, 4, timestamp)
                     needs_qa.append({"key": issue["key"], "summary": issue["summary"], "question_count": len(questions)})
