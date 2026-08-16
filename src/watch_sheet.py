@@ -515,24 +515,37 @@ def dedupe_tc_list(tc_list: list, threshold: float = 0.82) -> list:
 
 
 def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> str:
-    """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다."""
+    """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다.
+
+    이 파일은 generate_tc.py의 동명 함수를 import하지 않고 별도로 자체 정의하고 있다
+    (드리프트). generate_tc.py 쪽엔 있던 재시도/DailyTokenLimitError 변환 로직이 이 버전엔
+    통째로 빠져있어서, Groq 일일 토큰 한도 초과 시(2026-08-16 payday-budget 스펙 재검증
+    중 실제로 발생) 원본 groq.RateLimitError가 그대로 터져 main() 전체가 크래시했다
+    (generate_and_save_tc의 `except DailyTokenLimitError:` 래핑이 무력화됨). 이 파일의
+    다른 Groq 호출 함수(analyze_spec_for_plan/run_qa_analysis/_call_tc_api)와 동일한
+    패턴으로 맞춘다.
+    """
+    import time
     context_section = f"\n\n[서비스 컨텍스트]\n{context}" if context else ""
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 10년차 시니어 QA 엔지니어입니다. "
-                    "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
-                    "서비스 컨텍스트가 제공된 경우 이를 적극 반영하세요. "
-                    "한국어로 작성하세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"""아래 Jira 티켓 정보를 보고 테스트 관점의 요구사항을 추론해주세요.
+    response = None
+    for attempt in range(3):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "당신은 10년차 시니어 QA 엔지니어입니다. "
+                            "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
+                            "서비스 컨텍스트가 제공된 경우 이를 적극 반영하세요. "
+                            "한국어로 작성하세요."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""아래 Jira 티켓 정보를 보고 테스트 관점의 요구사항을 추론해주세요.
 
 티켓 유형: {issue['issue_type']}
 티켓 제목: {issue['summary']}
@@ -545,9 +558,25 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
 4. 보안·권한 고려사항 (해당 시)
 
 설명 없이 위 형식만 출력하세요.""",
-            },
-        ],
-    )
+                    },
+                ],
+            )
+            break
+        except Exception as e:
+            e_str = str(e).lower()
+            if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
+                raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
+            if "rate_limit" in e_str or "429" in str(e):
+                wait = 65 * (attempt + 1)
+                print(f"    [Rate Limit/분당] augment {wait}초 대기 후 재시도...")
+                time.sleep(wait)
+            else:
+                raise
+
+    if response is None:
+        print("  [오류] augment_ticket_spec Rate Limit 재시도 소진 — 원본 설명 그대로 사용")
+        return issue.get("description", "")
+
     return response.choices[0].message.content.strip()
 
 
@@ -593,7 +622,8 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 - 테스트유형: 반드시 "{test_type}" 으로 고정
 - 중요도 높은 시나리오를 우선 작성 (핵심 사용자 여정, 매출/주문/결제/가입/데이터 저장 영향 우선)
 - 사소한 엣지케이스(단순 형식 변형, 실제 영향이 낮은 반복 변형)는 제외
-- 사전조건/테스트단계/기대결과: 번호 매겨서 구체적으로 작성 ("1. ..." 형식, 항목이 여러 개면 "2.", "3."으로 이어서)
+- 사전조건/테스트단계: 번호 매겨서 구체적으로 작성 ("1. ..." 형식, 항목이 여러 개면 "2.", "3."으로 이어서)
+- 기대결과: 기본은 "1. ...됨" 한 줄. 여러 줄을 쓸 수 있는 경우는 원칙 8을 반드시 따를 것
 - 기대결과 각 항목: "~됨" 또는 "~함" 으로 끝낼 것
 
 [QA 관점의 테스트케이스 생성 원칙]
@@ -615,6 +645,10 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
    잘못된 TC: "SDK가 1.x이면 오류 메시지가 출력된다."
    올바른 TC: "설치된 SDK가 2.x 계열인지 확인한다."
 7. 목표 개수({count}개)를 채우기 위해 위 원칙(1~6)을 어기는 TC를 추가하지 않는다. 검증 가능한 조건이 목표보다 적으면 그만큼만 작성한다.
+8. TC 하나는 검증 목적 하나만 가진다. 기대결과에 서로 독립적으로 성공/실패할 수 있는 검증 항목을 여러 개 나열하지 않는다 — 그런 경우 기대결과를 합치지 말고 TC 자체를 분리해서 각각 별도로 작성한다.
+   같은 동작·같은 계산 결과에서 함께 파생되는, 분리해서 검증할 실익이 없는 값들만 예외적으로 기대결과 안에 여러 줄로 적을 수 있다.
+   예: "계산 로직이 UI와 분리됨" / "Vitest 테스트 통과" / "Production Build 성공"은 서로 다른 이유로 독립적으로 실패할 수 있으므로 TC 3개로 분리한다.
+   반면 "초과 금액이 0원으로 계산됨" / "일일 사용 가능 금액이 0원으로 계산됨"처럼 같은 시나리오(남은 예산 0원)에서 함께 파생되는 값은 하나의 TC에 여러 줄로 적어도 된다.
 
 JSON 배열만 출력하세요. 마크다운 없이.
 
@@ -654,6 +688,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
                             "환경/설정/빌드/CI 관련 요구사항과 기술 Task는 구현 절차가 아니라 빌드 성공 여부·설정값 적용·실행 결과를 확인하는 절차로 쓰세요. "
                             "요구사항에 정의되지 않은 오류 메시지·오류 화면·오류 로그·경고 팝업·fallback·자동 복구 동작을 상상해서 채우지 마세요. "
                             "정상 요구사항을 단순히 반대로 뒤집어 없는 오류 동작을 지어내는 Negative TC를 만들지 마세요. "
+                            "TC 하나는 검증 목적 하나만 가지세요 — 서로 독립적으로 실패할 수 있는 검증 항목이 여러 개면 기대결과에 나열하지 말고 TC를 분리하세요. "
                             "한국어로만 작성하세요."
                         ),
                     },
