@@ -1103,6 +1103,9 @@ def read_qa_answers(ws_qa) -> tuple:
     return rows, all_answered
 
 
+CONFIRMED_QA_MARKER = "[QA 검토에서 확정된 추가 정책]"
+
+
 def build_confirmed_spec(spec: str, qa_rows: list) -> str:
     """원본 기획서 + QA Review에서 사람이 확정한 답변을 하나의 텍스트로 합친다.
     사람의 답변은 원본 요구사항을 보완하는 확정 정책으로 취급되어, 기존
@@ -1112,7 +1115,22 @@ def build_confirmed_spec(spec: str, qa_rows: list) -> str:
     if not answered:
         return spec
     answers_block = "\n".join(f"- {q['question']}\n  → 확정: {q['answer']}" for q in answered)
-    return f"{spec}\n\n[QA 검토에서 확정된 추가 정책]\n{answers_block}"
+    return f"{spec}\n\n{CONFIRMED_QA_MARKER}\n{answers_block}"
+
+
+def extract_confirmed_qa_block(description: str) -> str:
+    """issue['description']에 build_confirmed_spec()이 붙인 확정 QA 블록이 있으면 그대로 추출한다.
+
+    augment_ticket_spec()은 부실한 Jira 티켓을 보완하려고 만든 함수라, "기능 요구사항 3~5개/
+    예외 케이스 2~3개"처럼 고정된 작은 틀로 요약한다. 기획서 기반 플로우에서 이 함수에 QA
+    Review 확정 답변(특히 날짜/경계값처럼 기존 3~5개 틀에 안 들어가는 항목)까지 같이 넣으면,
+    요약 과정에서 통째로 잘려나가는 걸 실제로 재현 확인함(2026-08-16, payday-budget Phase 2
+    스펙으로 재현 — 확정 답변 7개 중 날짜 관련 4개가 augmented_spec에서 전부 사라져서
+    analyze_spec_for_plan이 경계값 TC를 0개로 판단함). 요약에 정확성을 맡기지 않고, 이 블록을
+    원문 그대로 augmented_spec 뒤에 코드로 강제 첨부해 TC 플랜 단계가 반드시 보게 만든다.
+    """
+    idx = description.find(CONFIRMED_QA_MARKER)
+    return description[idx:] if idx != -1 else ""
 
 
 def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, row_idx: int, timestamp: str):
@@ -1131,6 +1149,12 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
         ws_input.update_cell(row_idx, 3, "오류: 일일 토큰 한도 초과")
         ws_input.update_cell(row_idx, 4, timestamp)
         return None, True
+
+    # QA Review 확정 답변은 augment_ticket_spec의 압축 요약을 못 믿고 원문 그대로 재첨부한다
+    # (extract_confirmed_qa_block 설명 참고 — 요약 과정에서 날짜/경계값류가 누락되는 걸 확인함).
+    confirmed_qa_block = extract_confirmed_qa_block(issue.get("description", ""))
+    if confirmed_qa_block:
+        augmented_spec = f"{augmented_spec}\n\n{confirmed_qa_block}"
 
     print(f"  TC 생성 중...")
     # analyze_spec_for_plan(TC 플랜 결정 단계)도 augment_ticket_spec과 별도로 Groq를 호출하고
