@@ -101,7 +101,7 @@ def analyze_spec_ambiguity(groq_client: Groq, issue: dict, context: str = "") ->
 설명 없이 위 항목들만 명확한 마크다운 문서로 출력하세요."""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",

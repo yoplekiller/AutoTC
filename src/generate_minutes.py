@@ -89,7 +89,7 @@ def summarize_minutes_from_notes(groq_client: Groq, agenda: str, notes: str, iss
     ) if issues else "없음"
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",
@@ -152,7 +152,7 @@ def generate_minutes_content(groq_client: Groq, agenda: str, issues: list) -> di
     ) if issues else "없음"
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",

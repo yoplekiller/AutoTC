@@ -143,7 +143,7 @@ def summarize_week(groq_client: Groq, issues: dict, ci_summaries: list, days: in
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",

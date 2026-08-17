@@ -74,7 +74,7 @@ iOS / Android / Web 에서 다른 동작이 있으면 명시하세요.
 이 기능 수정 시 영향받는 연관 기능 목록을 작성하세요."""
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",

@@ -360,7 +360,7 @@ def auto_generate_spec(groq_client: Groq, issue: dict) -> str:
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -532,7 +532,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -671,7 +671,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -754,7 +754,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -1009,7 +1009,7 @@ def run_qa_analysis(groq_client: Groq, issue: dict, context: str = "") -> dict:
     for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",

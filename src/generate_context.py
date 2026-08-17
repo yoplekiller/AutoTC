@@ -53,7 +53,7 @@ def generate_context(service_name: str, url_text: str = "", feature: str = "") -
     feature_section = f"\n\n[주목할 기능 영역]\n{feature}" if feature else ""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",

@@ -110,7 +110,7 @@ def read_spec_from_confluence_title(title: str, space: str = None) -> str:
 def generate_breakdown(groq_client: Groq, spec: str) -> dict:
     """기획서를 에픽 1개 + 하위 티켓 여러 개로 분해한다. 기획서에 없는 내용은 지어내지 않는다."""
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",
