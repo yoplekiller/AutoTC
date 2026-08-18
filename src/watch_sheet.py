@@ -372,7 +372,8 @@ def auto_generate_spec(groq_client: Groq, issue: dict) -> str:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=2000,
+                max_tokens=3000,
+                reasoning_effort="low",
             )
             break
         except Exception as e:
@@ -694,7 +695,8 @@ JSON 배열만 출력하세요. 마크다운 없이.
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=3000,
+                max_tokens=4500,
+                reasoning_effort="low",
             )
             break
         except Exception as e:
@@ -770,7 +772,8 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=200,
+                max_tokens=800,
+                reasoning_effort="low",
             )
             break
         except Exception as e:
@@ -1024,7 +1027,8 @@ def run_qa_analysis(groq_client: Groq, issue: dict, context: str = "") -> dict:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=1500,
+                max_tokens=2800,
+                reasoning_effort="medium",
             )
             break
         except Exception as e:

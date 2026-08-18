@@ -275,7 +275,8 @@ JSON 배열만 출력하세요. 마크다운 없이.
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=6000,
+                max_tokens=8000,
+                reasoning_effort="low",
             )
             break
         except Exception as e:
@@ -362,7 +363,8 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=200,
+                max_tokens=800,
+                reasoning_effort="low",
             )
             break
         except Exception as e:

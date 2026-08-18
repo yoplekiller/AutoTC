@@ -135,7 +135,8 @@ def analyze_impact(groq_client: Groq, diff: str, changed_files: list, tc_pool: l
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=2000,
+                max_tokens=3000,
+                reasoning_effort="low",
             )
             break
         except Exception as e:

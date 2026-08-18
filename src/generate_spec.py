@@ -87,7 +87,8 @@ iOS / Android / Web 에서 다른 동작이 있으면 명시하세요.
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=4000,
+        max_tokens=6000,
+        reasoning_effort="low",
     )
     return response.choices[0].message.content.strip()
 

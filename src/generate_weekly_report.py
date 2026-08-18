@@ -154,7 +154,8 @@ def summarize_week(groq_client: Groq, issues: dict, ci_summaries: list, days: in
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=500,
+                max_tokens=1000,
+                reasoning_effort="low",
             )
             break
         except Exception as e:

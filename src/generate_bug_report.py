@@ -95,7 +95,8 @@ def draft_bug_report(groq_client: Groq, failed_test: dict) -> dict:
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=1000,
+                max_tokens=1800,
+                reasoning_effort="low",
             )
             break
         except Exception as e:
