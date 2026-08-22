@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize
+from src.utils import sanitize, rate_limit_wait_seconds
 
 JIRA_URL = os.getenv("JIRA_URL", "")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
@@ -164,7 +164,7 @@ def summarize_week(groq_client: Groq, issues: dict, ci_summaries: list, days: in
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
             if "rate_limit" in e_str or "429" in str(e):
                 import time
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"  [Rate Limit] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:

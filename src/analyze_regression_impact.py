@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize
+from src.utils import sanitize, rate_limit_wait_seconds
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 DIFF_CHAR_LIMIT = 6000
@@ -145,7 +145,7 @@ def analyze_impact(groq_client: Groq, diff: str, changed_files: list, tc_pool: l
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과 — 내일 다시 시도하세요") from e
             if "rate_limit" in e_str or "429" in str(e):
                 import time
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"  [Rate Limit] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:

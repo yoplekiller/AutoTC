@@ -61,6 +61,7 @@ import requests
 from jira import JIRA
 from groq import Groq
 from dotenv import load_dotenv
+from src.utils import rate_limit_wait_seconds
 
 
 class DailyTokenLimitError(Exception):
@@ -381,7 +382,7 @@ def auto_generate_spec(groq_client: Groq, issue: dict) -> str:
             if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
             if "rate_limit" in e_str or "429" in str(e):
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"  [Rate Limit/분당] spec 생성 {wait}초 대기...")
                 time.sleep(wait)
             else:
@@ -570,7 +571,7 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
             if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
             if "rate_limit" in e_str or "429" in str(e):
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"    [Rate Limit/분당] augment {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:
@@ -598,7 +599,12 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
             "필드의 실제 데이터 타입과 맞지 않는 케이스(예: 코드 문자열에 최솟값/최댓값)는 작성하지 말 것"
         ),
         "회귀":     "이 기능 변경으로 영향받는 핵심 연관 기능(E2E 주요 경로) 중심 회귀 검증",
-        "보안":     "인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등 보안 취약점",
+        "보안":     (
+            "티켓 요구사항에 실제로 존재하는 보안 표면만 검증한다 — "
+            "서버 인증/API가 있는 경우: 인증 우회, 권한 상승, 토큰 탈취, SQL Injection 등; "
+            "인증/서버 없는 클라이언트 전용 로직인 경우: 로컬 저장소 데이터 노출·변조, 사용자 입력값 기반 XSS/인젝션, 민감정보 평문 저장 등. "
+            "요구사항에 이런 보안 표면 자체가 없다면(예: 인증·서버 통신이 없는 순수 클라이언트 계산 로직) 검증할 대상이 없는 것이므로 TC를 작성하지 않는다."
+        ),
         "UI/UX":    "핵심 화면의 버튼 활성화, 에러 문구, 전환/로딩 등 사용성에 직접 영향 주는 UI 동작",
         "네트워크": "느린 네트워크, 연결 끊김, 타임아웃 상황에서의 동작",
     }
@@ -627,6 +633,7 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 - 사소한 엣지케이스(단순 형식 변형, 실제 영향이 낮은 반복 변형)는 제외
 - 사전조건/테스트단계: 번호 매겨서 구체적으로 작성 ("1. ..." 형식, 항목이 여러 개면 "2.", "3."으로 이어서)
 - 사전조건 각 항목: "~음"/"~함"체로 끝낼 것 (예: "로그인되어 있음", "예산이 설정되어 있음", "앱이 실행 중임" — "~있다", "~이다" 같은 서술형 종결 금지)
+  단, "~확인함"/"~검증함"/"~판단함"처럼 테스트가 수행할 검증 행위 자체는 사전조건에 쓰지 않는다(원칙 9 참고)
 - 기대결과: 기본은 "1. ...됨" 한 줄. 여러 줄을 쓸 수 있는 경우는 원칙 8을 반드시 따를 것
 - 기대결과 각 항목: "~됨" 또는 "~함" 으로 끝낼 것
 
@@ -653,6 +660,10 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
    같은 동작·같은 계산 결과에서 함께 파생되는, 분리해서 검증할 실익이 없는 값들만 예외적으로 기대결과 안에 여러 줄로 적을 수 있다.
    예: "계산 로직이 UI와 분리됨" / "Vitest 테스트 통과" / "Production Build 성공"은 서로 다른 이유로 독립적으로 실패할 수 있으므로 TC 3개로 분리한다.
    반면 "초과 금액이 0원으로 계산됨" / "일일 사용 가능 금액이 0원으로 계산됨"처럼 같은 시나리오(남은 예산 0원)에서 함께 파생되는 값은 하나의 TC에 여러 줄로 적어도 된다.
+9. 사전조건은 테스트 시작 전에 이미 성립돼 있어야 할 구체적 상태만 적는다. "~확인함", "~검증함", "~판단함"처럼 이 테스트가 수행할 검증 행위 자체를 사전조건으로 적지 않는다 — 그건 사전조건이 아니라 테스트의 목적이다.
+   예: 테스트 시나리오 "주요 로직에 대한 보안 취약점을 검증"
+   잘못된 사전조건: "1. 계산 로직이 올바르게 동작하는 것을 확인함" / "2. 보안 취약점을 검증하기 위한 조건이 준비되어 있음"
+   올바른 사전조건: 실제로 존재하는 구체적 선행 상태만 적는다(예: "1. localStorage에 예산 데이터가 저장되어 있음"). 그런 구체적 선행 상태를 특정할 수 없다면 애초에 이 TC를 작성하지 않는다(원칙 1).
 
 JSON 배열만 출력하세요. 마크다운 없이.
 
@@ -693,6 +704,8 @@ JSON 배열만 출력하세요. 마크다운 없이.
                             "요구사항에 정의되지 않은 오류 메시지·오류 화면·오류 로그·경고 팝업·fallback·자동 복구 동작을 상상해서 채우지 마세요. "
                             "정상 요구사항을 단순히 반대로 뒤집어 없는 오류 동작을 지어내는 Negative TC를 만들지 마세요. "
                             "TC 하나는 검증 목적 하나만 가지세요 — 서로 독립적으로 실패할 수 있는 검증 항목이 여러 개면 기대결과에 나열하지 말고 TC를 분리하세요. "
+                            "사전조건은 테스트 시작 전에 이미 성립돼 있어야 할 구체적 상태만 적고, '~확인함'/'~검증함'처럼 테스트 자체가 할 검증 행위를 사전조건으로 적지 마세요 — "
+                            "구체적 선행 상태를 특정할 수 없다면 그 TC 자체를 작성하지 마세요. "
                             "한국어로만 작성하세요."
                         ),
                     },
@@ -708,7 +721,7 @@ JSON 배열만 출력하세요. 마크다운 없이.
             if is_daily:
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과 — 내일 다시 시도하세요") from e
             if "rate_limit" in e_str or "429" in str(e):
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"    [Rate Limit/분당] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:
@@ -784,7 +797,7 @@ def analyze_spec_for_plan(groq_client: Groq, issue: dict, augmented_spec: str, c
             if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
             if "rate_limit" in e_str or "429" in str(e):
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"    [Rate Limit/분당] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:
@@ -1039,7 +1052,7 @@ def run_qa_analysis(groq_client: Groq, issue: dict, context: str = "") -> dict:
             if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과") from e
             if "rate_limit" in e_str or "429" in str(e):
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"    [Rate Limit/분당] QA Analysis {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:

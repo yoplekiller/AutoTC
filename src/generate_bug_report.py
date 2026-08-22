@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize
+from src.utils import sanitize, rate_limit_wait_seconds
 from src.release_report import parse_report  # 모듈 임포트 시 sys.stdout을 utf-8 TextIOWrapper로 교체함
 from src.create_ticket import create_jira_ticket, find_open_ticket_by_label, add_comment
 
@@ -104,7 +104,7 @@ def draft_bug_report(groq_client: Groq, failed_test: dict) -> dict:
             if "per day" in e_str or "tpd" in e_str or "tokens_per_day" in e_str:
                 raise DailyTokenLimitError("Groq 일일 토큰 한도 초과 — 내일 다시 시도하세요") from e
             if "rate_limit" in e_str or "429" in str(e):
-                wait = 65 * (attempt + 1)
+                wait = rate_limit_wait_seconds(e, attempt)
                 print(f"    [Rate Limit] {wait}초 대기 후 재시도...")
                 time.sleep(wait)
             else:
