@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize, rate_limit_wait_seconds
+from utils import sanitize, rate_limit_wait_seconds
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 DIFF_CHAR_LIMIT = 6000

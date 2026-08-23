@@ -22,7 +22,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 import requests
 from groq import Groq
 from dotenv import load_dotenv
-from src.utils import rate_limit_wait_seconds
+from utils import rate_limit_wait_seconds
 
 
 class DailyTokenLimitError(Exception):

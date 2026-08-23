@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize, rate_limit_wait_seconds
+from utils import sanitize, rate_limit_wait_seconds
 from src.release_report import parse_report  # 모듈 임포트 시 sys.stdout을 utf-8 TextIOWrapper로 교체함
 from src.create_ticket import create_jira_ticket, find_open_ticket_by_label, add_comment
 

@@ -33,7 +33,7 @@ import requests
 from dotenv import load_dotenv
 from groq import Groq
 
-from src.utils import sanitize
+from utils import sanitize
 from src.create_ticket import build_description, jira_client
 
 load_dotenv()

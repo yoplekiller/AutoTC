@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize
+from utils import sanitize
 
 JIRA_URL = os.getenv("JIRA_URL", "")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")

@@ -20,7 +20,7 @@ from jira import JIRA
 from groq import Groq
 from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils import sanitize
+from utils import sanitize
 
 load_dotenv()
 
