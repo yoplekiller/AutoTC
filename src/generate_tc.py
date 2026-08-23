@@ -43,6 +43,25 @@ from utils import rate_limit_wait_seconds
 class DailyTokenLimitError(Exception):
     pass
 
+# TC Quality Gate — 실행 가능성 분류 (섹션 6). "수동 불가 = 삭제"하지 않고 분류만 한다.
+EXECUTION_TYPES = {
+    "MANUAL", "MANUAL_WITH_TOOL", "API_OR_MOCK_REQUIRED",
+    "AUTOMATION_RECOMMENDED", "ENVIRONMENT_SETUP_REQUIRED",
+    "NOT_EXECUTABLE", "REQUIREMENT_CLARIFICATION",
+}
+TEST_DESIGN_TECHNIQUES = {
+    "boundary_value", "equivalence_partition", "state_transition",
+    "decision_table", "error_guessing", "requirement_based",
+}
+QUALITY_STATUSES = {"PASS", "REVIEW", "REJECT"}
+REQUIREMENT_STATUSES = {"OK", "NEEDS_CLARIFICATION"}
+
+# 기대결과에 이 표현만 있고 구체적 관찰 대상(명사)이 없으면 PASS를 REVIEW로 강등한다.
+# LLM이 자기 출력의 품질을 관대하게 평가하는 경향을 보완하는 규칙 기반 이중 체크.
+_VAGUE_RESULT_PATTERN = re.compile(
+    r"(정상적으로|올바르게|문제\s*없이|정상\s*처리|정상\s*화면|성공적으로)\s*(동작|처리|표시|작동|저장)?\s*(됨|함)?\s*\.?\s*$"
+)
+
 load_dotenv()
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -127,10 +146,10 @@ def augment_ticket_spec(groq_client: Groq, issue: dict, context: str = "") -> st
 
 다음 항목을 간결하게 작성하세요:
 1. 기능 목적
-2. 주요 기능 요구사항 (3~5개)
-3. 예외/비정상 케이스 (2~3개)
-4. 보안·권한 고려사항 (해당 시)
-5. 확인이 필요한 질문 (기획서/티켓에 명시되지 않았지만 QA 관점에서 기획자·개발자에게 반드시 확인해야 하는 것 — 예: 경계값 처리 기준, 동시 요청 시 우선순위, 상태 전이 실패 시 롤백 여부 등. 해당 없으면 "없음")
+2. 주요 기능 요구사항 (3~5개). 각 항목 맨 앞에 "REQ-1.", "REQ-2." 형식으로 고유 번호를 매길 것 (이 번호는 뒤에서 TC가 근거로 인용함)
+3. 예외/비정상 케이스 (2~3개). 각 항목 맨 앞에 이어서 "REQ-4.", "REQ-5." 형식으로 번호를 계속 매길 것
+4. 보안·권한 고려사항 (해당 시). 있다면 이어서 REQ 번호를 매길 것
+5. 확인이 필요한 질문 (기획서/티켓에 명시되지 않았지만 QA 관점에서 기획자·개발자에게 반드시 확인해야 하는 것 — 예: 경계값 처리 기준, 동시 요청 시 우선순위, 상태 전이 실패 시 롤백 여부 등. 해당 없으면 "없음". 이 항목은 REQ 번호를 매기지 않음 — 아직 요구사항으로 확정되지 않았기 때문)
 
 설명 없이 위 형식만 출력하세요.""",
                     },
@@ -213,6 +232,34 @@ def _call_tc_api(groq_client: Groq, issue: dict, augmented_spec: str, context: s
 - 우선순위: 위험도와 발생 가능성(자주 타는 경로인지)을 함께 고려해 결정 — 위험도가 낮아도 자주 발생하는 경로면 우선순위는 높을 수 있음
 - 자동화가능여부: UI/API 자동화 도구(Selenium/Playwright/Appium 등)로 결정적으로 검증 가능하면 "가능", 육안 판단(디자인 정합성, 문구 뉘앙스 등)이나 외부 요인(실제 PG 결제 등)이 필요하면 "불가능"
 
+[requirement_refs / requirement_status — 요구사항 추적]
+- [요구사항] 섹션에 있는 "REQ-N." 번호 중 이 TC가 실제로 근거로 삼은 항목의 번호만 배열로 적으세요 (예: ["REQ-2", "REQ-4"]).
+- 근거로 삼을 수 있는 REQ 번호가 하나도 없는데도 이 TC를 작성해야 한다고 판단된다면, requirement_refs는 빈 배열로 두고 requirement_status를 "NEEDS_CLARIFICATION"으로 표시하세요. 근거가 명확하면 "OK"로 표시하세요.
+- 요구사항에 없는 기능을 상상해서 TC를 만들지 마세요 — 그럴 바엔 애초에 이 TC를 작성하지 마세요(원칙 1).
+
+[execution_type — 실행 가능성 분류. "수동 불가 = 작성 금지"가 아니라 분류가 목적입니다]
+- MANUAL: 화면 조작, 값 입력, 앱 재실행 등 일반 Manual QA가 UI만으로 바로 수행 가능
+- MANUAL_WITH_TOOL: Manual로 가능하지만 날짜 변경, 특정 기기/OS 등 보조 도구·환경이 필요
+- API_OR_MOCK_REQUIRED: 서버 장애 강제 발생, HTTP 응답 변조, DB 직접 수정 등 API Tool/Mock/Proxy 없이는 Precondition을 만들 수 없음
+- AUTOMATION_RECOMMENDED: 수동으로도 가능하지만 반복/정밀 검증이라 자동화가 더 적합
+- ENVIRONMENT_SETUP_REQUIRED: 별도 빌드/배포/환경 구성이 선행되어야 수행 가능
+- NOT_EXECUTABLE: 현재 일반적인 QA 환경에서 수행할 방법이 없음 (그래도 삭제하지 말고 이 값으로 표시)
+- REQUIREMENT_CLARIFICATION: 요구사항 자체가 불분명해서 기획 확인 없이는 Preconditions/기대결과를 확정할 수 없음
+- execution_type이 MANUAL이 아니면 required_tools(필요한 도구/환경, 배열, 없으면 빈 배열)와 execution_note(왜 이 분류인지 한 줄)를 채우세요. MANUAL이면 둘 다 빈 값으로 둡니다.
+
+[test_design_technique — 판단 가능한 경우에만 표시, 억지로 붙이지 말 것]
+boundary_value(경계값) / equivalence_partition(동등분할 대표값) / error_guessing(경험적 결함 추정) / state_transition(상태전이) / decision_table(조합 조건) / requirement_based(단순 요구사항 검증, 위 기법이 특별히 해당 안 되는 일반 케이스) 중 하나. 판단 근거가 약하면 requirement_based로 두세요.
+
+[quality_status / quality_reason — Quality Gate]
+아래 기준으로 스스로 판정하세요. 하나라도 명확히 실패하면 REJECT, 판단을 유보해야 하거나 도구/기획 확인이 필요하면 REVIEW, 전부 충족하면 PASS.
+1. requirement_status가 NEEDS_CLARIFICATION이면 자동으로 REVIEW 이상 (REJECT 사유가 겹치면 REJECT)
+2. Preconditions를 실제로 구성할 수 있는가 (Controllability)
+3. Steps를 실행할 수 있는가 (execution_type이 NOT_EXECUTABLE이면 REVIEW, 도구 필요는 REVIEW)
+4. 기대결과를 관찰로 판정할 수 있는가 (Observability) — "정상적으로/올바르게" 같은 추상 표현만 있으면 REVIEW
+5. 다른 TC와 검증 목적이 사실상 동일한가 (Duplication) — 그러면 REJECT
+6. 발생 확률이 낮다는 이유만으로 REJECT하지 마세요. 위험도(위 필드)가 낮은 것과 테스트 가치가 없는 것은 다릅니다. 경계값/이상입력/상태전이/데이터정합성/재진입/중복요청/네트워크오류/저장실패 케이스는 "일반 사용자가 잘 안 함"이라는 이유만으로 REJECT하지 마세요.
+quality_reason에는 판정 이유를 한 문장으로 남기세요 (예: "REQ-3 기반, Preconditions/기대결과 모두 관찰 가능 — PASS" / "서버 응답 변조가 필요해 Mock 없이는 Precondition 구성 불가 — REVIEW").
+
 [QA 관점의 테스트케이스 생성 원칙]
 1. 요구사항에 명시되어 있거나 요구사항으로부터 합리적으로 검증 가능한 동작만 TC로 작성한다. 요구사항에 근거가 없는 기능·화면·정책을 임의로 만들어 TC를 작성하지 않는다.
 2. TC는 이미 구현 완료된 결과물이 요구사항을 만족하는지 검증하는 관점으로 작성하고, 구현 방법(어떻게 만드는지)을 설명하지 않는다. 테스트 수행자가 기능을 새로 구현하거나, 설정을 새로 만들거나, 코드를 수정해야만 수행 가능한 절차는 TC로 작성하지 않는다.
@@ -255,7 +302,15 @@ JSON 배열만 출력하세요. 마크다운 없이.
     "테스트시나리오": "...",
     "사전조건": "1. ...\\n2. ...",
     "테스트단계": "1. ...\\n2. ...\\n3. ...",
-    "기대결과": "1. ...됨"
+    "기대결과": "1. ...됨",
+    "requirement_refs": ["REQ-2"],
+    "requirement_status": "OK/NEEDS_CLARIFICATION",
+    "execution_type": "MANUAL/MANUAL_WITH_TOOL/API_OR_MOCK_REQUIRED/AUTOMATION_RECOMMENDED/ENVIRONMENT_SETUP_REQUIRED/NOT_EXECUTABLE/REQUIREMENT_CLARIFICATION",
+    "required_tools": [],
+    "execution_note": "",
+    "test_design_technique": "boundary_value/equivalence_partition/state_transition/decision_table/error_guessing/requirement_based",
+    "quality_status": "PASS/REVIEW/REJECT",
+    "quality_reason": "..."
   }}
 ]"""
 
@@ -284,6 +339,8 @@ JSON 배열만 출력하세요. 마크다운 없이.
                             "TC 하나는 검증 목적 하나만 가지세요 — 서로 독립적으로 실패할 수 있는 검증 항목이 여러 개면 기대결과에 나열하지 말고 TC를 분리하세요. "
                             "사전조건은 테스트 시작 전에 이미 성립돼 있어야 할 구체적 상태만 적고, '~확인함'/'~검증함'처럼 테스트 자체가 할 검증 행위를 사전조건으로 적지 마세요 — "
                             "구체적 선행 상태를 특정할 수 없다면 그 TC 자체를 작성하지 마세요. "
+                            "각 TC마다 요구사항 근거(requirement_refs), 실행 가능성 분류(execution_type), Quality Gate 판정(quality_status/quality_reason)을 프롬프트의 기준표 그대로 스스로 채점해서 채우세요 — "
+                            "수동으로 바로 실행할 수 없는 TC라고 삭제하지 말고 execution_type으로 분류만 하고, 발생 확률이 낮다는 이유만으로 REJECT하지 마세요. "
                             "한국어로만 작성하세요."
                         ),
                     },
@@ -497,9 +554,14 @@ def save_excel(results: list, output_path: str):
         "TC ID", "대분류", "소분류", "테스트 유형",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
         "테스트 상태", "비고 / 버그 링크", "우선순위", "위험도", "자동화 가능여부",
+        "Quality 판정", "판정 사유",
+        "요구사항 근거", "요구사항 상태", "실행 가능성", "필요 도구", "실행 메모", "설계 기법",
     ]
-    col_widths = [14, 14, 16, 12, 35, 28, 45, 35, 12, 20, 10, 10, 14]
-    last_col_letter = "M"
+    col_widths = [14, 14, 16, 12, 35, 28, 45, 35, 12, 20, 10, 10, 14, 12, 32, 16, 16, 20, 20, 30, 16]
+    last_col_letter = "U"
+    # Quality 판정(N)/판정 사유(O)는 QA가 후보 TC를 훑어볼 때 바로 봐야 하는 핵심 신호라 노출.
+    # 나머지(요구사항 근거~설계 기법)는 판정 근거를 따져볼 때만 필요한 메타데이터라 M열과 같은 방식으로 숨김.
+    hidden_columns = ["M", "P", "Q", "R", "S", "T", "U"]
 
     header_font  = Font(bold=True, color="FFFFFF")
     header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -511,6 +573,11 @@ def save_excel(results: list, output_path: str):
         "High":   PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid"),
         "Medium": PatternFill(start_color="FFF3CC", end_color="FFF3CC", fill_type="solid"),
         "Low":    PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid"),
+    }
+    quality_fills = {
+        "PASS":   PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid"),
+        "REVIEW": PatternFill(start_color="FFF3CC", end_color="FFF3CC", fill_type="solid"),
+        "REJECT": PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid"),
     }
 
     for item in results:
@@ -545,9 +612,10 @@ def save_excel(results: list, output_path: str):
             cell.alignment = header_align
             ws.column_dimensions[cell.column_letter].width = width
         ws.row_dimensions[3].height = 25
-        # 자동화가능여부(M열)는 수동 테스트 수행 시 방해되지 않도록 기본 숨김 처리
-        # (자동화 대상 TC를 고를 때만 펼쳐서 확인)
-        ws.column_dimensions["M"].hidden = True
+        # 자동화가능여부(M) + 요구사항/실행성/설계기법 메타데이터(P~U)는 수동 테스트 수행 시
+        # 방해되지 않도록 기본 숨김 처리 (필요할 때만 펼쳐서 확인)
+        for col_letter in hidden_columns:
+            ws.column_dimensions[col_letter].hidden = True
 
         # 행 4~: TC 데이터
         last_row = 3 + len(item["test_cases"])
@@ -573,6 +641,18 @@ def save_excel(results: list, output_path: str):
             if risk in level_fills:
                 r_cell.fill = level_fills[risk]
             ws.cell(row=r_idx, column=13, value=tc.get("자동화가능여부", "")).alignment = data_align
+            quality_status = tc.get("quality_status", "")
+            q_cell = ws.cell(row=r_idx, column=14, value=quality_status)
+            q_cell.alignment = data_align
+            if quality_status in quality_fills:
+                q_cell.fill = quality_fills[quality_status]
+            ws.cell(row=r_idx, column=15, value=tc.get("quality_reason", "")).alignment = data_align
+            ws.cell(row=r_idx, column=16, value=", ".join(tc.get("requirement_refs", []))).alignment = data_align
+            ws.cell(row=r_idx, column=17, value=tc.get("requirement_status", "")).alignment = data_align
+            ws.cell(row=r_idx, column=18, value=tc.get("execution_type", "")).alignment = data_align
+            ws.cell(row=r_idx, column=19, value=", ".join(tc.get("required_tools", []))).alignment = data_align
+            ws.cell(row=r_idx, column=20, value=tc.get("execution_note", "")).alignment = data_align
+            ws.cell(row=r_idx, column=21, value=tc.get("test_design_technique", "")).alignment = data_align
             ws.row_dimensions[r_idx].height = 70
 
         # TC가 0개(예: 한도 초과로 생성 중단)면 드롭다운을 걸 데이터 범위 자체가 없으므로 스킵
@@ -586,6 +666,11 @@ def save_excel(results: list, output_path: str):
             dv_auto = DataValidation(type="list", formula1='"가능,불가능"', allow_blank=True, showDropDown=False)
             dv_auto.sqref = f"M4:M{last_row}"
             ws.add_data_validation(dv_auto)
+
+            # Quality 판정 드롭다운 (N열): QA가 AI 판정을 직접 덮어쓸 수 있도록 함
+            dv_quality = DataValidation(type="list", formula1='"PASS,REVIEW,REJECT"', allow_blank=True, showDropDown=False)
+            dv_quality.sqref = f"N4:N{last_row}"
+            ws.add_data_validation(dv_quality)
 
     wb.save(output_path)
 
@@ -654,13 +739,21 @@ def save_to_sheets(results: list, sheet_id: str):
         "TC ID", "대분류", "소분류", "테스트 유형",
         "테스트 시나리오(목적)", "사전 조건", "테스트 단계", "기대 결과",
         "테스트 상태", "비고 / 버그 링크", "우선순위", "위험도", "자동화 가능여부",
+        "Quality 판정", "판정 사유",
+        "요구사항 근거", "요구사항 상태", "실행 가능성", "필요 도구", "실행 메모", "설계 기법",
     ]
     level_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
         "Low":    {"red": 0.85, "green": 0.92, "blue": 0.85},
     }
-    col_widths = [100, 110, 120, 110, 280, 200, 320, 260, 100, 160, 90, 90, 110]
+    quality_colors = {
+        "PASS":   {"red": 0.85, "green": 0.92, "blue": 0.85},
+        "REVIEW": {"red": 1.0,  "green": 0.95, "blue": 0.8},
+        "REJECT": {"red": 1.0,  "green": 0.8,  "blue": 0.8},
+    }
+    col_widths = [100, 110, 120, 110, 280, 200, 320, 260, 100, 160, 90, 90, 110, 90, 240, 130, 120, 140, 160, 220, 120]
+    last_col_letter = "U"
     total_tc = 0
 
     for item in results:
@@ -684,7 +777,7 @@ def save_to_sheets(results: list, sheet_id: str):
             "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
             "horizontalAlignment": "LEFT",
         })
-        ws.merge_cells("A1:M1")
+        ws.merge_cells(f"A1:{last_col_letter}1")
 
         # 행 2: 요구사항 분석 (확인 필요한 질문 포함)
         ws.update([[item.get("augmented_spec", "")]], "A2")
@@ -694,11 +787,11 @@ def save_to_sheets(results: list, sheet_id: str):
             "wrapStrategy": "WRAP",
             "textFormat": {"fontSize": 9, "foregroundColor": {"red": 0.27, "green": 0.27, "blue": 0.27}},
         })
-        ws.merge_cells("A2:M2")
+        ws.merge_cells(f"A2:{last_col_letter}2")
 
         # 행 3: 컬럼 헤더
         ws.update([headers], "A3")
-        ws.format("A3:M3", {
+        ws.format(f"A3:{last_col_letter}3", {
             "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
             "horizontalAlignment": "CENTER",
@@ -721,13 +814,21 @@ def save_to_sheets(results: list, sheet_id: str):
                 tc.get("우선순위", ""),
                 tc.get("위험도", ""),
                 tc.get("자동화가능여부", ""),
+                tc.get("quality_status", ""),
+                tc.get("quality_reason", ""),
+                ", ".join(tc.get("requirement_refs", [])),
+                tc.get("requirement_status", ""),
+                tc.get("execution_type", ""),
+                ", ".join(tc.get("required_tools", [])),
+                tc.get("execution_note", ""),
+                tc.get("test_design_technique", ""),
             ])
         if rows_data:
             ws.update(rows_data, "A4")
             end_row = 4 + len(rows_data)
 
             # 데이터 셀 정렬: 세로=가운데, 가로=왼쪽
-            ws.format(f"A4:M{end_row - 1}", {
+            ws.format(f"A4:{last_col_letter}{end_row - 1}", {
                 "verticalAlignment": "MIDDLE",
                 "horizontalAlignment": "LEFT",
                 "wrapStrategy": "WRAP",
@@ -744,10 +845,13 @@ def save_to_sheets(results: list, sheet_id: str):
                 r_color = level_colors.get(tc.get("위험도", ""))
                 if r_color:
                     color_requests.append({"range": f"L{4 + i}", "format": {"backgroundColor": r_color}})
+                q_color = quality_colors.get(tc.get("quality_status", ""))
+                if q_color:
+                    color_requests.append({"range": f"N{4 + i}", "format": {"backgroundColor": q_color}})
             if color_requests:
                 ws.batch_format(color_requests)
 
-            # 기존 드롭다운 초기화 후 테스트 상태(I열)/자동화 가능여부(M열) 드롭다운 재설정
+            # 기존 드롭다운 초기화 후 테스트 상태(I열)/자동화 가능여부(M열)/Quality 판정(N열) 드롭다운 재설정
             sh.batch_update({"requests": [
                 {
                     "setDataValidation": {
@@ -756,7 +860,7 @@ def save_to_sheets(results: list, sheet_id: str):
                             "startRowIndex": 3,
                             "endRowIndex": end_row,
                             "startColumnIndex": 0,
-                            "endColumnIndex": 13,
+                            "endColumnIndex": 21,
                         },
                     }
                 },
@@ -806,6 +910,29 @@ def save_to_sheets(results: list, sheet_id: str):
                         },
                     }
                 },
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 3,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": 13,
+                            "endColumnIndex": 14,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": "PASS"},
+                                    {"userEnteredValue": "REVIEW"},
+                                    {"userEnteredValue": "REJECT"},
+                                ],
+                            },
+                            "showCustomUi": True,
+                            "strict": False,
+                        },
+                    }
+                },
             ]})
 
             # 열 너비 설정
@@ -816,14 +943,18 @@ def save_to_sheets(results: list, sheet_id: str):
             }} for i, px in enumerate(col_widths)]
             sh.batch_update({"requests": requests_body})
 
-            # 자동화가능여부(M열, index 12)는 수동 테스트 수행 시 방해되지 않도록 기본 숨김 처리
-            sh.batch_update({"requests": [{
-                "updateDimensionProperties": {
-                    "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 12, "endIndex": 13},
-                    "properties": {"hiddenByUser": True},
-                    "fields": "hiddenByUser",
-                }
-            }]})
+            # 자동화가능여부(M, index 12) + 요구사항/실행성/설계기법 메타데이터(P~U, index 15~20)는
+            # 수동 테스트 수행 시 방해되지 않도록 기본 숨김 처리 (Quality 판정/사유는 N/O로 노출 유지)
+            hidden_ranges = [(12, 13), (15, 21)]
+            sh.batch_update({"requests": [
+                {
+                    "updateDimensionProperties": {
+                        "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": start, "endIndex": end},
+                        "properties": {"hiddenByUser": True},
+                        "fields": "hiddenByUser",
+                    }
+                } for start, end in hidden_ranges
+            ]})
 
         total_tc += len(item["test_cases"])
         print(f"  '{sheet_title}' — TC {len(item['test_cases'])}개 저장")
@@ -911,6 +1042,52 @@ def sanitize_tc(tc: dict, test_type: str, seq: int = None) -> dict:
     expected = tc.get("기대결과")
     if isinstance(expected, str) and expected and not re.match(r"^\s*1\.", expected):
         tc["기대결과"] = f"1. {expected}"
+
+    # ── Quality Gate 필드 정규화 (LLM이 스키마를 벗어난 값을 낼 수 있으므로 안전한 기본값으로 보정) ──
+    tc["source_type"] = "requirement"
+
+    refs = tc.get("requirement_refs")
+    tc["requirement_refs"] = [str(r).strip() for r in refs if str(r).strip()] if isinstance(refs, list) else []
+
+    # requirement_refs가 비어있으면 LLM이 뭐라 자평했든(설령 "OK"라 해도) 신뢰하지 않고 강제로
+    # NEEDS_CLARIFICATION 처리한다 — "근거 없음"과 "OK"는 동시에 참일 수 없는 자기모순이기 때문.
+    if not tc["requirement_refs"]:
+        tc["requirement_status"] = "NEEDS_CLARIFICATION"
+    else:
+        req_status = str(tc.get("requirement_status", "")).strip().upper()
+        tc["requirement_status"] = req_status if req_status in REQUIREMENT_STATUSES else "OK"
+
+    exec_type = str(tc.get("execution_type", "")).strip().upper()
+    tc["execution_type"] = exec_type if exec_type in EXECUTION_TYPES else "MANUAL"
+
+    tools = tc.get("required_tools")
+    tc["required_tools"] = [str(t).strip() for t in tools if str(t).strip()] if isinstance(tools, list) else []
+    tc["execution_note"] = tc.get("execution_note") or ""
+
+    technique = str(tc.get("test_design_technique", "")).strip().lower()
+    tc["test_design_technique"] = technique if technique in TEST_DESIGN_TECHNIQUES else "requirement_based"
+
+    status = str(tc.get("quality_status", "")).strip().upper()
+    tc["quality_status"] = status if status in QUALITY_STATUSES else "REVIEW"
+    tc["quality_reason"] = tc.get("quality_reason") or ""
+
+    # requirement_status가 불명확한데 PASS로 자평했다면 규칙 기반으로 강등 (섹션 4 Traceability 원칙)
+    if tc["requirement_status"] == "NEEDS_CLARIFICATION" and tc["quality_status"] == "PASS":
+        tc["quality_status"] = "REVIEW"
+        tc["quality_reason"] = (tc["quality_reason"] + " / " if tc["quality_reason"] else "") + \
+            "요구사항 근거 불명확 (requirement_refs 없음) — 규칙 기반 자동 강등"
+
+    # 기대결과가 관찰 불가능한 추상 표현뿐이면 PASS를 REVIEW로 강등 (LLM 자기평가를 신뢰하지 않는 이중 체크, 섹션 9)
+    if tc["quality_status"] == "PASS" and isinstance(expected, str):
+        content_lines = [
+            re.sub(r"^\s*\d+\.\s*", "", ln).strip()
+            for ln in expected.split("\n") if ln.strip()
+        ] or [expected]
+        if all(_VAGUE_RESULT_PATTERN.fullmatch(ln) for ln in content_lines):
+            tc["quality_status"] = "REVIEW"
+            tc["quality_reason"] = (tc["quality_reason"] + " / " if tc["quality_reason"] else "") + \
+                "기대결과가 관찰 가능한 대상 없이 추상적 표현뿐임 — 규칙 기반 자동 강등"
+
     return tc
 
 
@@ -926,16 +1103,22 @@ def filter_tc_list(tc_list: list) -> list:
 
 
 def dedupe_tc_list(tc_list: list, threshold: float = 0.82) -> list:
-    """테스트시나리오가 서로 유사한 중복 TC를 제거합니다 (먼저 나온 것을 우선 유지)."""
+    """테스트 목적(시나리오+기대결과)이 서로 유사한 중복 TC를 제거합니다 (먼저 나온 것을 우선 유지).
+
+    시나리오 문장만 비교하면 표현만 다르고 실제 검증 목적(기대결과)이 같은 TC를 놓칠 수 있어
+    (섹션 2-4), 기대결과까지 합친 문자열로 비교 범위를 넓힌다.
+    """
     kept = []
-    kept_scenarios = []
+    kept_signatures = []
     for tc in tc_list:
         scenario = (tc.get("테스트시나리오") or "").strip()
-        if any(SequenceMatcher(None, scenario, s).ratio() >= threshold for s in kept_scenarios):
+        expected = (tc.get("기대결과") or "").strip()
+        signature = f"{scenario} {expected}"
+        if any(SequenceMatcher(None, signature, s).ratio() >= threshold for s in kept_signatures):
             print(f"    [중복 제외] {tc.get('tc_id')} - {scenario}")
             continue
         kept.append(tc)
-        kept_scenarios.append(scenario)
+        kept_signatures.append(signature)
     return kept
 
 
@@ -1016,7 +1199,7 @@ def main():
     input_str = args.input
 
     # ── 템플릿 생성 모드
-    if input_str == "--template":
+    if args.template:
         path = create_template("tickets_template.xlsx")
         print(f"템플릿 생성 완료: {path}")
         print("A열에 티켓 URL 또는 이슈 키를 입력한 후 실행하세요.")
