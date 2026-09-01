@@ -1,7 +1,7 @@
 # AutoTC — AI 기반 QA 업무 자동화 툴킷
 
 > Jira 티켓 → TC 자동 생성, Playwright 테스트 결과 → 릴리즈 판단까지  
-> AI(Groq LLaMA 3.3 70B)가 QA의 "판단 업무"를 자동화하는 툴킷  
+> AI(Groq GPT-OSS 120B)가 QA의 "판단 업무"를 자동화하는 툴킷  
 > TC 작성은 AI가, QA는 검토와 의사결정에 집중
 
 ## 구성 요소
@@ -109,8 +109,14 @@ Test Design Assistant**로 보고 아래 게이트를 추가했습니다.
   PASS), 기대결과가 "정상적으로"/"올바르게" 같은 추상 표현뿐인데 PASS로 자평하면, 규칙
   기반 코드가 강제로 REVIEW로 강등 (LLM이 자기 출력을 관대하게 평가하는 경향 보완)
 
-> 이 게이트는 `generate_tc.py`(Jira 티켓 경로)에만 적용돼 있고, `watch_sheet.py`(구글 시트
-> 자동 폴링 경로)는 아직 이전 스키마로 동작합니다.
+> 이 게이트 로직은 `tc_core.py` 공통 모듈에 있어 `generate_tc.py`(Jira 티켓 경로)와
+> `watch_sheet.py`(구글 시트 자동 폴링 경로) 양쪽에 동일하게 적용됩니다.
+
+### 기대결과 1개 = TC 1개
+같은 시나리오에서 파생되는 값이라도 기대결과를 여러 줄로 나열하지 않고, 값 개수만큼 TC를
+분리합니다. 기대결과는 예외 없이 `"1. ...됨"` 한 줄만 허용 — LLM이 이 규칙을 어기고 여러
+줄을 반환하면 `sanitize_tc`가 규칙 기반으로 PASS를 REVIEW로 자동 강등합니다(LLM 자기평가를
+신뢰하지 않는 이중 체크, 위 Quality Gate와 동일한 패턴).
 
 ### 서비스 컨텍스트 주입
 - `contexts/{서비스명}.md`에 도메인 정보 작성
@@ -163,7 +169,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 | 항목 | 기술 |
 |------|------|
-| AI 모델 | Groq API (LLaMA 3.3 70B) |
+| AI 모델 | Groq API (GPT-OSS 120B) |
 | 이슈 관리 | Jira REST API |
 | 결과 저장 | Google Sheets API (gspread) |
 | CI/CD | GitHub Actions (10분 스케줄) |
@@ -179,6 +185,7 @@ AutoTC/
 │   ├── generate_tc.py        # 단일/일괄 TC 생성 (CLI) — 동적 플랜 포함
 │   ├── generate_tc_from_spec.py # 기획서(파일/Confluence) → TC 생성 (Jira 티켓 없이, 항상 에픽 기준 최소 수량 적용)
 │   ├── watch_sheet.py        # 구글 시트 폴링 + TC 자동 생성 (메인)
+│   ├── tc_core.py            # TC 생성 공통 로직(Quality Gate 포함) — generate_tc.py/watch_sheet.py 공유 모듈
 │   ├── release_report.py     # Playwright 결과 → AI 릴리즈 판단 → Slack 전송
 │   ├── generate_spec.py      # 티켓 기반 기획서 자동 생성
 │   ├── generate_context.py   # 서비스 컨텍스트 초안 AI 생성
@@ -187,6 +194,9 @@ AutoTC/
 │   ├── generate_minutes.py   # 회의록 자동 생성 (--notes-file로 실제 메모 정리 / 없으면 사전 아젠다 초안)
 │   ├── create_ticket.py      # 자연어(짧은 설명) → Jira 티켓 1개 자동 생성
 │   ├── generate_tickets_from_spec.py # 기획서(파일/Confluence) → 에픽+하위 티켓 여러 개 자동 생성
+│   ├── generate_bug_report.py # Playwright 실패 결과 → AI 버그 리포트 초안 → (선택) Jira 티켓 생성
+│   ├── analyze_regression_impact.py # git diff 기반 회귀 영향 분석 — 변경사항이 어떤 기존 TC에 영향 주는지 AI 추천
+│   ├── generate_weekly_report.py # Jira 티켓 + CI 실행 이력 → 주간 QA 활동 요약 → Confluence 게시
 │   ├── slack_app.py          # Slack 슬래시 커맨드 (/tc, /review, /spec-review)
 │   └── utils.py              # 공통 유틸
 ├── app.py                    # Slack 커맨드 서버 (Flask, 로컬 + ngrok)
