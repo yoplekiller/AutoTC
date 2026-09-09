@@ -9,3 +9,4 @@ google-auth
 pyngrok
 slack-bolt
 slack-sdk
+pytest

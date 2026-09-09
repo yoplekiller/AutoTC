@@ -627,23 +627,34 @@ def filter_tc_list(tc_list: list) -> list:
 
 
 def dedupe_tc_list(tc_list: list, threshold: float = 0.82) -> list:
-    """테스트 목적(시나리오+기대결과)이 서로 유사한 중복 TC를 제거합니다 (먼저 나온 것을 우선 유지).
+    """테스트 목적(시나리오+기대결과) 문장이 서로 유사한 TC를 찾아 표시합니다 (물리 삭제하지 않음).
 
     시나리오 문장만 비교하면 표현만 다르고 실제 검증 목적(기대결과)이 같은 TC를 놓칠 수 있어,
     기대결과까지 합친 문자열로 비교 범위를 넓힌다.
+
+    과거엔 유사도 임계값을 넘으면 뒤에 나온 TC를 그냥 삭제했으나, 경계값 상한/하한처럼
+    시나리오·기대결과 문장은 같아도 검증 조건(입력값 등)이 다른 TC까지 함께 지워지는 문제가 있어
+    (2026-09-09) 물리 삭제 대신 dedupe_status="POSSIBLE_DUPLICATE" + duplicate_of로 표시만 하고
+    모든 TC를 보존한다. 최종 판단(정말 중복인지)은 QA 검토 단계로 넘긴다.
     """
-    kept = []
-    kept_signatures = []
+    originals = []  # (signature, tc) — dedupe_status="UNIQUE"로 분류된 TC만 비교 기준으로 삼는다
     for tc in tc_list:
         scenario = (tc.get("테스트시나리오") or "").strip()
         expected = (tc.get("기대결과") or "").strip()
         signature = f"{scenario} {expected}"
-        if any(SequenceMatcher(None, signature, s).ratio() >= threshold for s in kept_signatures):
-            print(f"    [중복 제외] {tc.get('tc_id')} - {scenario}")
-            continue
-        kept.append(tc)
-        kept_signatures.append(signature)
-    return kept
+        match = next(
+            (orig_tc for sig, orig_tc in originals if SequenceMatcher(None, signature, sig).ratio() >= threshold),
+            None,
+        )
+        if match is not None:
+            tc["dedupe_status"] = "POSSIBLE_DUPLICATE"
+            tc["duplicate_of"] = match.get("tc_id")
+            print(f"    [중복 후보] {tc.get('tc_id')} ~ {match.get('tc_id')} - {scenario}")
+        else:
+            tc["dedupe_status"] = "UNIQUE"
+            tc["duplicate_of"] = None
+            originals.append((signature, tc))
+    return tc_list
 
 
 def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str, context: str = "") -> list:

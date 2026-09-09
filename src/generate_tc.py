@@ -42,6 +42,10 @@ from tc_core import (
     augment_ticket_spec, analyze_spec_for_plan, generate_test_cases,
     filter_tc_list, dedupe_tc_list, _get_gspread_client,
 )
+from traceability import (
+    parse_requirements, build_conditions, link_test_cases,
+    compute_coverage_report, is_generation_complete,
+)
 
 load_dotenv()
 
@@ -535,12 +539,25 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list, context: str =
         for tc in tc_list:
             print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
 
+        requirements = parse_requirements(augmented_spec, source_id=issue["key"])
+        conditions = build_conditions(requirements)
+        conditions, tc_list, invalid_references = link_test_cases(conditions, requirements, tc_list)
+        coverage_report = compute_coverage_report(conditions, invalid_references)
+        if not is_generation_complete(tc_list):
+            print(f"  [경고] TC 0건 — 생성 미완료로 처리 (성공으로 보지 않음)")
+        if invalid_references:
+            print(f"  [경고] 존재하지 않는 요구사항을 참조한 TC {len(invalid_references)}건: {invalid_references}")
+        print(f"  Coverage: {coverage_report['by_status']}")
+
         results.append({
             "key": issue["key"],
             "summary": issue["summary"],
             "status": issue["status"],
             "augmented_spec": augmented_spec,
             "test_cases": tc_list,
+            "requirements": requirements,
+            "conditions": conditions,
+            "coverage_report": coverage_report,
         })
 
         if idx < total:
