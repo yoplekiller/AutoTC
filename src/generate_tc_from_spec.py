@@ -59,6 +59,10 @@ from src.generate_tickets_from_spec import (
     read_spec_file,
     read_spec_from_confluence,
 )
+from src.traceability import (
+    parse_requirements, build_conditions, link_test_cases,
+    compute_coverage_report, is_generation_complete,
+)
 
 load_dotenv()
 
@@ -104,12 +108,25 @@ def process_spec(groq_client: Groq, spec: str, key: str, context: str = "") -> d
             f"[{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}"
         )
 
+    requirements = parse_requirements(augmented_spec, source_id=issue["key"])
+    conditions = build_conditions(requirements)
+    conditions, tc_list, invalid_references = link_test_cases(conditions, requirements, tc_list)
+    coverage_report = compute_coverage_report(conditions, invalid_references)
+    if not is_generation_complete(tc_list):
+        print(f"  [경고] TC 0건 — 생성 미완료로 처리 (성공으로 보지 않음)")
+    if invalid_references:
+        print(f"  [경고] 존재하지 않는 요구사항을 참조한 TC {len(invalid_references)}건: {invalid_references}")
+    print(f"  Coverage: {coverage_report['by_status']}")
+
     return {
         "key": issue["key"],
         "summary": issue["summary"],
         "status": issue["status"],
         "augmented_spec": augmented_spec,
         "test_cases": tc_list,
+        "requirements": requirements,
+        "conditions": conditions,
+        "coverage_report": coverage_report,
     }
 
 

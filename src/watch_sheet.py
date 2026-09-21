@@ -68,6 +68,10 @@ from tc_core import (
     sanitize_tc, filter_tc_list, dedupe_tc_list, _get_gspread_client,
     _sanitize_text,
 )
+from traceability import (
+    parse_requirements, build_conditions, link_test_cases,
+    compute_coverage_report, is_generation_complete,
+)
 
 load_dotenv()
 
@@ -825,11 +829,24 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
     for tc in tc_list:
         print(f"    [{tc.get('tc_id')}] [{tc.get('대분류', '-')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트시나리오', '')}")
 
+    requirements = parse_requirements(augmented_spec, source_id=issue["key"])
+    conditions = build_conditions(requirements)
+    conditions, tc_list, invalid_references = link_test_cases(conditions, requirements, tc_list)
+    coverage_report = compute_coverage_report(conditions, invalid_references)
+    if not is_generation_complete(tc_list):
+        print(f"  [경고] TC 0건 — 생성 미완료로 처리 (성공으로 보지 않음)")
+    if invalid_references:
+        print(f"  [경고] 존재하지 않는 요구사항을 참조한 TC {len(invalid_references)}건: {invalid_references}")
+    print(f"  Coverage: {coverage_report['by_status']}")
+
     create_ticket_sheet(sh, issue, tc_list, timestamp)
     mark_row_review_pending(ws_input, row_idx, timestamp)
     print(f"  상태 업데이트: 검수 대기")
 
-    return {"key": issue["key"], "summary": issue["summary"], "tc_count": len(tc_list)}, False
+    return {
+        "key": issue["key"], "summary": issue["summary"], "tc_count": len(tc_list),
+        "coverage_report": coverage_report,
+    }, False
 
 
 def mark_row_review_pending(ws_input, row_idx: int, timestamp: str):
@@ -853,7 +870,13 @@ def notify_slack(processed: list, sheet_id: str, needs_qa: list = None):
     if processed:
         lines.append(f"*[TC 자동 생성 완료 — 검수 요청]* {len(processed)}개 티켓 처리됨")
         for item in processed:
-            lines.append(f"  • `{item['key']}` {item['summary']} — TC {item['tc_count']}개 (검수 대기)")
+            coverage_line = ""
+            report = item.get("coverage_report")
+            if report:
+                missing = report["by_status"].get("MISSING_TC", 0)
+                if missing:
+                    coverage_line = f" (조건 {report['total_conditions']}개 중 미커버 {missing}건)"
+            lines.append(f"  • `{item['key']}` {item['summary']} — TC {item['tc_count']}개 (검수 대기){coverage_line}")
     if needs_qa:
         lines.append(f"\n*[QA 확인 필요]* {len(needs_qa)}건")
         for item in needs_qa:
