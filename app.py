@@ -4,13 +4,20 @@ AutoTC Slack 슬래시 커맨드 서버
 지원 커맨드:
   /testplan MKQA-1 MKQA-2 MKQA-3       → Confluence 테스트 계획서 자동 생성
   /ticket 결제 시 쿠폰 적용이 안 됨    → Jira 티켓 자동 생성
+  /spec-to-tickets 월급까지 - Phase 1 기획서 → 기획서(Confluence) → 에픽+하위 티켓 자동 생성
 
 실행:
   python app.py
 """
 
 import os
+import sys
 import threading
+
+# src/ 모듈들은 `from utils import ...`처럼 src/ 기준으로 import함(직접 실행 호환) —
+# 루트에서 띄우는 이 서버에서도 그 import가 풀리도록 src/를 경로에 추가
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
 from flask import Flask, request, jsonify
 import requests
 from dotenv import load_dotenv
@@ -221,6 +228,76 @@ def slack_minutes():
     })
 
 
+# ── /spec-to-tickets ─────────────────────────────────────────────────
+
+def run_spec_to_tickets(source: str, response_url: str):
+    try:
+        from src.generate_tickets_from_spec import (
+            read_spec_from_confluence,
+            read_spec_from_confluence_title,
+            generate_breakdown,
+            create_epic,
+            create_child_ticket,
+        )
+        from groq import Groq
+
+        groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        project_key = os.getenv("JIRA_PROJECT_KEY", "MKQA")
+
+        # source가 URL이면 그대로, 아니면 Confluence 페이지 제목(정확히 일치)으로 조회
+        if source.startswith("http"):
+            spec = read_spec_from_confluence(source)
+        else:
+            spec = read_spec_from_confluence_title(source)
+
+        breakdown = generate_breakdown(groq_client, spec)
+        epic_data = breakdown.get("epic", {})
+        tickets = breakdown.get("tickets", [])
+
+        epic_result = create_epic(epic_data, project_key)
+
+        created = [create_child_ticket(t, epic_result["key"], project_key) for t in tickets]
+
+        ticket_list = "\n".join(
+            f">  <{c['url']}|{c['key']}> [{c['issue_type']}] {c['summary']}" for c in created
+        )
+        reply(response_url,
+            f":bookmark_tabs: *기획서 기반 티켓 생성 완료*\n"
+            f">*에픽:* <{epic_result['url']}|{epic_result['key']}> {epic_data.get('summary', '')}\n"
+            f">*하위 티켓 {len(created)}개:*\n{ticket_list}"
+        )
+    except Exception as e:
+        reply(response_url, f"오류 발생: {e}", is_error=True)
+
+
+@app.route("/slack/spec-to-tickets", methods=["POST"])
+def slack_spec_to_tickets():
+    text = request.form.get("text", "").strip()
+    response_url = request.form.get("response_url")
+
+    if not text:
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": (
+                "사용법: `/spec-to-tickets 월급까지 - Phase 1 기획서` "
+                "(Confluence 페이지 제목, 정확히 일치해야 함)\n"
+                "또는 `/spec-to-tickets https://xxx.atlassian.net/wiki/spaces/.../pages/123` (URL)"
+            )
+        })
+
+    # CLI 버전과 달리 대화형 (y/n) 확인 없이 바로 생성함 — 다른 Slack 커맨드(/ticket, /testplan)와 동일한 방식
+    threading.Thread(
+        target=run_spec_to_tickets,
+        args=(text, response_url),
+        daemon=True,
+    ).start()
+
+    return jsonify({
+        "response_type": "in_channel",
+        "text": f":hourglass: *\"{text}\"* 기획서 기반으로 에픽+티켓 생성 중... (몇 분 걸릴 수 있어요)"
+    })
+
+
 # ── 서버 실행 ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -238,6 +315,7 @@ if __name__ == "__main__":
         print(f"  /testplan    → {public_url}/slack/testplan")
         print(f"  /ticket      → {public_url}/slack/ticket")
         print(f"  /minutes     → {public_url}/slack/minutes")
+        print(f"  /spec-to-tickets → {public_url}/slack/spec-to-tickets")
         print(f"  /tc          → {public_url}/slack/events")
         print(f"  /review      → {public_url}/slack/events")
         print(f"  /spec-review → {public_url}/slack/events")
