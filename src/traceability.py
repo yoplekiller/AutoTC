@@ -4,8 +4,10 @@ Requirement -> TestCondition -> TestCase 추적성 계산 (AutoTC 2.0, 2026-09-0
 augment_ticket_spec()이 만드는 "REQ-N." 텍스트를 구조화된 Requirement로 파싱하고,
 condition_planner(v1)로 TestCondition을 만든 뒤 TC와 연결해 Coverage/GAP을 계산한다.
 
+LLM 기반 조건 설계(자유서술형 분할 + TC 매핑)는 llm_condition_planner.py가 담당하고, 여기서는
+그 매핑(condition_assignments)을 검증해 받아들이기만 한다.
+
 범위 밖(의도적으로 하지 않는 것):
-- LLM 기반 조건 설계(condition_planner v1은 규칙 기반 숫자 범위만 다룬다)
 - 생성 파이프라인의 실패를 요구사항 단위로 정밀 추적하는 것(현재 생성은 REQ 단위가 아니라
   테스트유형 단위로 진행되므로 GENERATION_FAILED는 호출자가 명시적으로 넘겨준 경우에만 반영한다)
 """
@@ -94,15 +96,26 @@ def _boundary_value_mentioned(condition: dict, text_blob: str) -> bool:
     return re.search(rf"(?<!\d){re.escape(value)}(?!\d)", text_blob) is not None
 
 
-def _resolve_condition_id(tc: dict, valid_refs: list, conditions_by_req: dict) -> str | None:
+def _resolve_condition_id(
+    tc: dict, valid_refs: list, conditions_by_req: dict, condition_assignments: dict | None = None
+) -> str | None:
     """TC가 정확히 어느 조건에 해당하는지 결정한다.
 
+    - condition_assignments(llm_condition_planner가 만든 {tc_id: condition_id})가 있으면 먼저 쓰되,
+      그 조건이 TC가 실제로 참조한 요구사항 소속일 때만 받아들인다 — LLM이 엉뚱한 요구사항의
+      조건에 붙인 경우는 버리고 아래 규칙 기반 판정으로 넘어간다.
     - 요구사항이 조건 1개(자유서술형/미확정)로만 매핑돼 있으면 참조만으로 충분히 결정되므로
       기존과 동일하게 자동 연결한다(기존 단순 requirement 흐름 유지).
     - 요구사항이 경계값 조건 여러 개로 분할돼 있으면 requirement_refs만으로는 어느 경계값인지
       알 수 없다 — TC 텍스트에 그 경계값이 리터럴 숫자로 등장할 때만 연결하고, 등장하는 값이
       0개거나 2개 이상(모호)이면 임의로 추론하지 않고 연결하지 않는다.
     """
+    assigned = (condition_assignments or {}).get(tc.get("tc_id"))
+    if assigned:
+        for req_id in valid_refs:
+            if any(c["condition_id"] == assigned for c in conditions_by_req.get(req_id, [])):
+                return assigned
+
     text_blob = " ".join(
         str(tc.get(f, "")) for f in ("테스트시나리오", "사전조건", "테스트단계", "기대결과")
     )
@@ -121,6 +134,7 @@ def link_test_cases(
     requirements: list,
     tc_list: list,
     generation_failed_requirement_ids: set | None = None,
+    condition_assignments: dict | None = None,
 ) -> tuple:
     """TC의 requirement_refs를 검증하고 condition_id를 부여한 뒤, 조건별 Coverage 상태를 갱신한다.
 
@@ -142,7 +156,9 @@ def link_test_cases(
         for ref in invalid_refs:
             invalid_references.append({"tc_id": tc.get("tc_id"), "requirement_id": ref})
 
-        tc["condition_id"] = _resolve_condition_id(tc, valid_refs, conditions_by_req)
+        tc["condition_id"] = _resolve_condition_id(
+            tc, valid_refs, conditions_by_req, condition_assignments
+        )
         tc["invalid_requirement_refs"] = invalid_refs
 
     for condition in conditions:

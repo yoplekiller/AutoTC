@@ -26,6 +26,7 @@ REQUIREMENT_STATUSES = {"OK", "NEEDS_CLARIFICATION"}
 CONDITION_PLANNING_STATUSES = {
     "STRUCTURED",                    # 명시적 제약(숫자 범위 등)을 파싱해 경계 조건으로 분할함
     "CONDITION_PLANNING_UNRESOLVED",  # 규칙에 매칭되지 않아 요구사항 전체를 조건 1개로만 남김(임의 추론 안 함)
+    "LLM_INFERRED",                  # 규칙에 안 걸린 자유서술형을 LLM이 분할함(llm_condition_planner) — 원문 명시가 아니라 AI 추론임을 구분
 }
 
 # 근거 출처 구분 — Audit 5번 섹션 지적사항(모든 TC가 source_type="requirement"로 덮여

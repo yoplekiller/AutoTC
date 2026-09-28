@@ -72,6 +72,7 @@ from traceability import (
     parse_requirements, build_conditions, link_test_cases,
     compute_coverage_report, is_generation_complete,
 )
+from llm_condition_planner import plan_conditions_with_llm
 
 load_dotenv()
 
@@ -831,7 +832,10 @@ def generate_and_save_tc(sh, ws_input, groq_client, issue: dict, context: str, r
 
     requirements = parse_requirements(augmented_spec, source_id=issue["key"])
     conditions = build_conditions(requirements)
-    conditions, tc_list, invalid_references = link_test_cases(conditions, requirements, tc_list)
+    conditions, condition_assignments = plan_conditions_with_llm(groq_client, requirements, conditions, tc_list)
+    conditions, tc_list, invalid_references = link_test_cases(
+        conditions, requirements, tc_list, condition_assignments=condition_assignments
+    )
     coverage_report = compute_coverage_report(conditions, invalid_references)
     if not is_generation_complete(tc_list):
         print(f"  [경고] TC 0건 — 생성 미완료로 처리 (성공으로 보지 않음)")
